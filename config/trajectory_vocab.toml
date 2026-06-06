@@ -1,0 +1,21 @@
+[vocabulary]
+path = "model/trajectory_vocab/trajectory_vocab_256.npz"
+physical_key = "trajectory_vocab_m"
+symlog_key = "trajectory_vocab_symlog"
+normalized_key = "trajectory_vocab_normalized"
+scale_key = "symlog_scale"
+num_trajectories = 256
+future_points = 6
+trajectory_dim = 2
+
+[embedding]
+hidden_dim = 384
+frequency_count = 64
+frequency_base = 2.0
+frequency_scale = 3.141592653589793
+swiglu_hidden_dim = 768
+
+[decoder]
+logit_init_value = 1.0
+residual_output_init_value = 0.0
+residual_activation = "tanh"

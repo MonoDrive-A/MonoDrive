@@ -170,13 +170,40 @@ $$
 公式为：
 
 $$
-P_{GT}=Softmax \left(
-Logit_{pre_i}=
-\frac{10}{(\frac{1}{MSE+eps})_{max}}
+P_{GT}
+=
+\frac{
+Softmax \left(
+Logit_{pre_i}
+=
+10
 \times
-\frac{1}{MSE_i+eps},
-Logit_{Traj_{Danger}}=-1e9
+\frac{
+\frac{1}{MSE_i+\varepsilon}
+}{
+\max_j\left(\frac{1}{MSE_j+\varepsilon}\right)
+},
+\quad
+Logit_{Traj_{Danger}}=-10^9
 \right)
+}{
+\max_j
+\left[
+Softmax \left(
+Logit_{pre_j}
+=
+10
+\times
+\frac{
+\frac{1}{MSE_j+\varepsilon}
+}{
+\max_k\left(\frac{1}{MSE_k+\varepsilon}\right)
+},
+\quad
+Logit_{Traj_{Danger}}=-10^9
+\right)
+\right]
+}
 $$
 
 模型输出同样通过 Softmax 归一化。
