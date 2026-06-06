@@ -63,10 +63,12 @@ output = decoder(trajectory_queries.unsqueeze(0))
 - 修改词表数量、未来点数、轨迹维度或 `hidden_dim` 时，必须同步检查 shape 校验、解码输出和代码文档。
 - 解码层初始化要求 logits 初始输出 1，Tanh 残差初始输出 0。
 - 高频编码和嵌入层输入必须来自 `.npz` 的已归一化词表字段。
+- SwiGLU 激活来自公共 `model/swiglu.py`，不要在本文件重新实现私有激活层。
 
 ## 7. 维护记录
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-06 | 1os3_Codex | AI 完成：记录轨迹词表嵌入层改为复用公共 SwiGLU。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：将摘要文档移动到镜像目录 `doc/Code Doc/model/trajectory_vocab/`。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：新增模型侧轨迹词表模块摘要。 |

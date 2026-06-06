@@ -88,7 +88,7 @@
 
 `load_trajectory_vocabulary` 要求 `.npz` 同时包含物理词表、Symlog 词表、已归一化词表和 `symlog_scale`。三个词表字段必须与配置中的 `[V, K, D]` 一致，且不能包含 NaN 或 Inf。模型嵌入层只注册 `trajectory_vocab_normalized` 作为 buffer；物理和 Symlog 字段保留给后续 loss、推理或可视化使用。
 
-`TrajectoryVocabularyEmbedding` 对已归一化轨迹执行高频编码。每个归一化坐标乘以 `frequency_scale * frequency_base ** i`，其中 `i` 为频带索引；随后拼接 sin 和 cos，展平后进入 `Linear -> SwiGLU -> Linear`，输出 384 维轨迹查询特征。
+`TrajectoryVocabularyEmbedding` 对已归一化轨迹执行高频编码。每个归一化坐标乘以 `frequency_scale * frequency_base ** i`，其中 `i` 为频带索引；随后拼接 sin 和 cos，展平后进入 `Linear -> SwiGLU -> Linear`，输出 384 维轨迹查询特征。SwiGLU 激活来自公共模块 `model/swiglu.py`，轨迹词表文件不再维护私有激活实现。
 
 `TrajectoryVocabularyDecoder` 使用一个线性层输出 `1 + K * D` 个通道。第 0 个通道作为 logit，不做激活；剩余通道 reshape 为 `[B, V, K, D]` 并经过 Tanh 得到残差。初始化时线性层所有权重为 0，logit bias 为 1，使初始 logit 全部输出 1；残差 bias 设置为 `atanh(residual_output_init_value)`，当前配置下 Tanh 后初始残差为 0。
 
@@ -117,6 +117,7 @@
 
 - 上游：`config/trajectory_vocab.toml`、`model/trajectory_vocab/trajectory_vocab_256.npz`。
 - 下游：Transformer 轨迹查询初始化、轨迹词表概率输出、Winner 残差回归监督。
+- 项目内依赖：`model/swiglu.py`。
 - 第三方依赖：`numpy`、`torch`。
 - 标准库依赖：`dataclasses`、`math`、`pathlib`、`tomllib`、`typing`。
 
@@ -132,5 +133,6 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-06 | 1os3_Codex | AI 完成：改为复用公共 `model/swiglu.py` 中的 `SwiGLU` 激活。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：将模型侧轨迹词表模块移动到 `model/trajectory_vocab/`，与词表 `.npz` 同目录。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：新增模型侧轨迹词表加载、归一化词表嵌入和单层线性解码模块。 |

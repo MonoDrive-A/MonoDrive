@@ -11,7 +11,8 @@ from typing import Any, Mapping, NamedTuple
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from model.swiglu import SwiGLU
 
 
 __all__ = [
@@ -148,14 +149,6 @@ class TrajectoryDecoderOutput(NamedTuple):
     residuals: torch.Tensor
 
 
-class _SwiGLU(nn.Module):
-    """SwiGLU 激活，输入最后一维拆分为 value 和 gate。"""
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        value_features, gate_features = features.chunk(2, dim=-1)
-        return value_features * F.silu(gate_features)
-
-
 class TrajectoryVocabularyEmbedding(nn.Module):
     """将归一化轨迹词表编码为轨迹查询特征。
 
@@ -195,7 +188,7 @@ class TrajectoryVocabularyEmbedding(nn.Module):
             config.high_frequency_encoding_dim,
             config.swiglu_hidden_dim * 2,
         )
-        self.activation = _SwiGLU()
+        self.activation = SwiGLU()
         self.linear_out = nn.Linear(config.swiglu_hidden_dim, config.hidden_dim)
 
     def forward(self) -> torch.Tensor:
