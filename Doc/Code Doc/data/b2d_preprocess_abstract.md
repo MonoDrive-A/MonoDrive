@@ -61,7 +61,7 @@ output_paths = preprocess_b2d_dataset(config, overwrite=True)
 - 修改帧率、轨迹点数或坐标系时必须同步更新 `doc/Model.md`。
 - 默认 target 来自未来真实 ego 轨迹候选池；不要回退为直接读取 B2D command 或 target 字段。
 - B2D `theta` 到 world yaw 的换算使用 $yaw = \theta - \pi/2$；轨迹、Agent、速度、加速度和 Map 必须复用同一 ego 坐标变换。
-- 未来轨迹默认不平滑；即使 1 次平滑也可能导致轨迹几何失真，危险轨迹碰撞判定仍必须使用未来每帧实际 Agent 标签。
+- 未来轨迹默认不平滑；即使 1 次平滑也可能导致轨迹几何失真。当前训练数据处理不使用危险轨迹判定。
 - Agent 可见性过滤使用 `CAM_FRONT.world2cam/intrinsic` 投影 3D 角点；缺少有效角点、缺少相机内外参或投影失败时不应默认视为可见。
 - Agent 准入要求同一 Agent ID 在 8 帧历史输入窗口内至少 2 帧满足单帧可见性条件；当前帧中心仍必须在检测范围内。
 - Agent 范围裁剪、Agent future 构造、Map 可见性过滤和 Map 重采样必须在预处理端完成。
@@ -77,6 +77,7 @@ output_paths = preprocess_b2d_dataset(config, overwrite=True)
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-07 | 1os3_Codex | AI 完成：同步当前训练数据处理不使用危险轨迹判定的说明。 |
 | 2026-06-05 | 1os3_Codex | AI 完成：同步 Map 缓存无 hash canonical 命名和旧 hash 前缀兼容读取。 |
 | 2026-06-05 | 1os3_Codex | AI 完成：同步预处理日志和可指定 Map 缓存目录的口径。 |
 | 2026-06-05 | 1os3_Codex | AI 完成：同步 H5 v5 Agent future 位移语义。 |

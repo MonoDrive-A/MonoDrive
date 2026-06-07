@@ -47,6 +47,8 @@ TRAJECTORY_COLORS = [
     (234, 179, 8),
     (220, 38, 38),
 ]
+DEFAULT_TRAJECTORY_TOP_K = 5
+DEFAULT_DETECTION_TOP_K = 48
 
 
 @dataclass(frozen=True)
@@ -117,8 +119,15 @@ def run_backbone_feature_pca_sample(
     config_path: str | Path,
     project_root: str | Path,
     device: str | torch.device = "cpu",
+    trajectory_top_k: int = DEFAULT_TRAJECTORY_TOP_K,
+    agent_top_k: int = DEFAULT_DETECTION_TOP_K,
+    map_top_k: int = DEFAULT_DETECTION_TOP_K,
 ) -> BackboneFeaturePCAVisualizationData:
     """调用真实统一主干，收集每层视觉 Token PCA 数据。"""
+
+    _validate_positive_int(trajectory_top_k, "trajectory_top_k")
+    _validate_positive_int(agent_top_k, "agent_top_k")
+    _validate_positive_int(map_top_k, "map_top_k")
 
     resolved_project_root = Path(project_root).resolve()
     resolved_h5_path = _resolve_project_path(h5_path, resolved_project_root, "h5_path")
@@ -180,6 +189,9 @@ def run_backbone_feature_pca_sample(
         backbone_output,
         model,
         sample,
+        trajectory_top_k=trajectory_top_k,
+        agent_top_k=agent_top_k,
+        map_top_k=map_top_k,
     )
     return BackboneFeaturePCAVisualizationData(
         scene_name=str(sample["scene_name"]),
@@ -217,6 +229,9 @@ def render_backbone_feature_pca_sample(
     output_path: str | Path,
     project_root: str | Path,
     device: str | torch.device = "cpu",
+    trajectory_top_k: int = DEFAULT_TRAJECTORY_TOP_K,
+    agent_top_k: int = DEFAULT_DETECTION_TOP_K,
+    map_top_k: int = DEFAULT_DETECTION_TOP_K,
 ) -> Path:
     """运行真实统一主干并导出每层 PCA 诊断 PNG。"""
 
@@ -228,6 +243,9 @@ def render_backbone_feature_pca_sample(
         config_path=config_path,
         project_root=resolved_project_root,
         device=device,
+        trajectory_top_k=trajectory_top_k,
+        agent_top_k=agent_top_k,
+        map_top_k=map_top_k,
     )
     rendered_image = render_visualization(visualization_data)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -654,9 +672,9 @@ def _summarize_model_outputs(
     backbone_output: MonoDriveBackboneOutput,
     model: MonoDriveBackbone,
     sample: dict[str, Any],
-    trajectory_top_k: int = 5,
-    agent_top_k: int = 12,
-    map_top_k: int = 12,
+    trajectory_top_k: int = DEFAULT_TRAJECTORY_TOP_K,
+    agent_top_k: int = DEFAULT_DETECTION_TOP_K,
+    map_top_k: int = DEFAULT_DETECTION_TOP_K,
 ) -> ModelOutputVisualizationData:
     """把模型空间输出转换为 BEV 诊断图使用的米制数据。"""
 
@@ -897,6 +915,13 @@ def _resolve_project_path(path: str | Path, project_root: Path, field_name: str)
     return resolved_path
 
 
+def _validate_positive_int(value: int, field_name: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{field_name} 必须为整数，实际为 {value!r}。")
+    if value <= 0:
+        raise ValueError(f"{field_name} 必须为正整数，实际为 {value}。")
+
+
 def _default_output_path(h5_path: Path, sample_index: int, output_dir: Path) -> Path:
     return output_dir / f"{h5_path.stem}_backbone_feature_pca_{sample_index:06d}.png"
 
@@ -919,6 +944,24 @@ def main(argv: list[str] | None = None) -> int:
         help="默认输出目录，必须位于项目目录内。",
     )
     parser.add_argument("--device", default="cpu", help="运行设备，例如 cpu 或 cuda。")
+    parser.add_argument(
+        "--trajectory-top-k",
+        type=int,
+        default=DEFAULT_TRAJECTORY_TOP_K,
+        help="模型输出 BEV 面板绘制的轨迹 top-k 数量。",
+    )
+    parser.add_argument(
+        "--agent-top-k",
+        type=int,
+        default=DEFAULT_DETECTION_TOP_K,
+        help="模型输出 BEV 面板绘制的 Agent 数量，默认显示完整 48 个查询。",
+    )
+    parser.add_argument(
+        "--map-top-k",
+        type=int,
+        default=DEFAULT_DETECTION_TOP_K,
+        help="模型输出 BEV 面板绘制的 Map 数量，默认显示完整 48 个查询。",
+    )
     args = parser.parse_args(argv)
 
     project_root = PROJECT_ROOT.resolve()
@@ -930,6 +973,9 @@ def main(argv: list[str] | None = None) -> int:
         output_path=output_path,
         project_root=project_root,
         device=args.device,
+        trajectory_top_k=args.trajectory_top_k,
+        agent_top_k=args.agent_top_k,
+        map_top_k=args.map_top_k,
     )
     print(rendered_path)
     return 0

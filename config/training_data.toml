@@ -1,0 +1,37 @@
+[dataset]
+h5_dir = "data/preprocessed"
+normalize_images = true
+random_target_point = true
+scan_on_init = true
+
+[modules]
+detection_head_config_path = "config/detection_head.toml"
+trajectory_vocab_config_path = "config/trajectory_vocab.toml"
+
+[validation]
+image_min = 0.0
+image_max = 1.0
+future_trajectory_abs_max_m = 200.0
+ego_motion_abs_max = 100.0
+agent_position_abs_max_m = 200.0
+agent_size_min_m = 0.05
+agent_size_max_m = 50.0
+agent_motion_abs_max = 100.0
+map_position_abs_max_m = 200.0
+
+[trajectory_label]
+inverse_mse_eps = 1e-6
+inverse_mse_max_logit = 10.0
+label_normalize_max = true
+
+[agent_matching]
+class_cost_weight = 1.0
+center_cost_weight = 2.0
+size_cost_weight = 0.5
+yaw_cost_weight = 0.5
+future_cost_weight = 1.0
+
+[map_matching]
+class_cost_weight = 1.0
+point_cost_weight = 2.0
+bidirectional_class_names = ["lane_divider", "road_edge"]

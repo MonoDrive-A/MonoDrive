@@ -1,0 +1,50 @@
+# train/__init__.py
+
+## 1. 文件职责
+
+`train/__init__.py` 是训练辅助包入口，使用懒加载方式导出训练数据处理模块的公开接口。
+
+## 2. 公开接口
+
+| 名称 | 类型 | 说明 |
+| --- | --- | --- |
+| `TrainingDataConfig` | dataclass | 训练数据处理配置。 |
+| `ValidatedTrainingDataset` | class | 过滤无效样本的 Dataset。 |
+| `build_training_batch_labels` | function | 构造训练标签。 |
+| `build_training_dataset` | function | 构建训练 Dataset。 |
+| `training_collate` | function | 合并 batch。 |
+
+## 3. 关键类和函数
+
+本文件仅提供懒加载导出，不实现训练逻辑。
+
+## 4. 输入输出与 Shape
+
+| 名称 | Shape | 说明 |
+| --- | --- | --- |
+| 无 | 无 | 本文件不直接处理张量。 |
+
+## 5. 关键实现逻辑
+
+`__getattr__` 在访问公开名称时动态导入 `train.data_processing`，降低包初始化时的依赖加载成本。
+
+## 6. 配置项
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| 无 | 无 | 本文件不读取配置。 |
+
+## 7. 依赖关系
+
+- 上游：`train.data_processing`。
+- 下游：训练入口和测试代码。
+
+## 8. 注意事项
+
+- 新增训练公开接口时，应同步 `__all__` 和 `_LAZY_EXPORTS`。
+
+## 9. 维护记录
+
+| 日期 | 修改人 | 变更 |
+| --- | --- | --- |
+| 2026-06-07 | 1os3_Codex | AI 完成：新增训练包入口文档。 |
