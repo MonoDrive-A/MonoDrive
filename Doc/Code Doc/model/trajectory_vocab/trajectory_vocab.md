@@ -40,15 +40,15 @@
 
 - 功能：将归一化轨迹词表编码为轨迹查询 embedding。
 - 输入：`TrajectoryVocabData.trajectory_vocab_normalized`。
-- 输出：轨迹查询特征 `[256, 384]`。
+- 输出：FP32 轨迹查询特征 `[256, 384]`。
 - Shape：`[256, 6, 2] -> y/x 分别编码为 [256, 6, 128] -> [256, 6, 256] -> [256, 1536] -> [256, 384]`。
 - 关键参数：`frequency_count`、`frequency_base`、`frequency_scale`、`swiglu_hidden_dim`、`hidden_dim`。
 
 ### `TrajectoryVocabularyDecoder`
 
 - 功能：单层线性层从轨迹 token 特征输出轨迹词表 logit 和残差。
-- 输入：`trajectory_features`，shape 为 `[B, 256, 384]`。
-- 输出：`TrajectoryDecoderOutput`。
+- 输入：`trajectory_features`，shape 为 `[B, 256, 384]`，可来自 BF16 主干但会在本模块内转为 FP32。
+- 输出：FP32 `TrajectoryDecoderOutput`。
 - Shape：`logits` 为 `[B, 256]`，`residuals` 为 `[B, 256, 6, 2]`。
 - 关键参数：`logit_init_value=1.0`，`residual_output_init_value=0.0`，`residual_activation=tanh`。
 
@@ -77,10 +77,10 @@
 | `trajectory_vocab_normalized` | `[256, 6, 2]` | 已归一化词表，嵌入层使用该字段。 |
 | `frequency_bands` | `[64]` | 高频编码频带，当前为 $2\pi / 10^{i/64}$。 |
 | 高频编码特征 | `[256, 1536]` | 每个时间步按 `[phi_y(y), phi_x(x)]` 拼接，每坐标 64 个频率，每个频率 sin/cos 两项。 |
-| `trajectory_queries` | `[256, 384]` | 轨迹查询特征。 |
-| `trajectory_features` | `[B, 256, 384]` | Transformer 输出的轨迹 token 特征。 |
-| `logits` | `[B, 256]` | 未激活轨迹词表 logit。 |
-| `residuals` | `[B, 256, 6, 2]` | Tanh 后 Symlog 残差。 |
+| `trajectory_queries` | `[256, 384]` | FP32 轨迹查询特征。 |
+| `trajectory_features` | `[B, 256, 384]` | Transformer 输出的轨迹 token 特征，进入解码前转为 FP32。 |
+| `logits` | `[B, 256]` | FP32 未激活轨迹词表 logit。 |
+| `residuals` | `[B, 256, 6, 2]` | FP32 Tanh 后 Symlog 残差。 |
 
 ## 5. 关键实现逻辑
 
@@ -95,6 +95,8 @@ $$
 $$
 
 代码中由 `frequency_scale / frequency_base ** (i / frequency_count)` 表示，当前配置为 `frequency_scale=2π`、`frequency_base=10`、`frequency_count=64`。单个坐标的编码顺序为 `[sin_0, cos_0, ..., sin_63, cos_63]`；每个时间步按 `[phi_y(y), phi_x(x)]` 拼接，再展平进入 `Linear -> SwiGLU -> Linear`，输出 384 维轨迹查询特征。SwiGLU 激活来自公共模块 `model/swiglu.py`，轨迹词表文件不再维护私有激活实现。
+
+轨迹词表嵌入和解码组件都强制保持 FP32 精度。模块初始化和 `_apply()` 结束后会把所有浮点参数、buffer 和已有梯度恢复为 FP32，避免父模型整体 `.to(dtype=torch.bfloat16)` 时误改本模块精度。`forward` 内部使用禁用 autocast 的上下文，嵌入层的高频编码、两层线性映射、解码层线性头和 Tanh 残差激活均在 FP32 下执行；解码输入如果来自 BF16 Transformer 主干，会先转为 FP32。
 
 `TrajectoryVocabularyDecoder` 使用一个线性层输出 `1 + K * D` 个通道。第 0 个通道作为 logit，不做激活；剩余通道 reshape 为 `[B, V, K, D]` 并经过 Tanh 得到残差。初始化时线性层所有权重为 0，logit bias 为 1，使初始 logit 全部输出 1；残差 bias 设置为 `atanh(residual_output_init_value)`，当前配置下 Tanh 后初始残差为 0。
 
@@ -125,11 +127,12 @@ $$
 - 下游：Transformer 轨迹查询初始化、轨迹词表概率输出、Winner 残差回归监督。
 - 项目内依赖：`model/swiglu.py`。
 - 第三方依赖：`numpy`、`torch`。
-- 标准库依赖：`dataclasses`、`math`、`pathlib`、`tomllib`、`typing`。
+- 标准库依赖：`contextlib`、`dataclasses`、`math`、`pathlib`、`tomllib`、`typing`。
 
 ## 8. 注意事项
 
-- 数值稳定性：高频编码和 `.npz` 加载均使用 FP32；残差输出经 Tanh 限制到 `[-1, 1]`。
+- 数值稳定性：高频编码、嵌入 MLP、解码线性头、Tanh 残差和 `.npz` 加载均使用 FP32；残差输出经 Tanh 限制到 `[-1, 1]`。
+- 混合精度：即使外层 autocast 或父模型 `.to(dtype=torch.bfloat16)` 生效，本模块浮点参数、buffer 和输出仍保持 FP32。
 - 初始化：logit 初始输出为 1，不代表已经 Softmax 后的概率为 1；所有词表项 logit 相同，Softmax 后为均匀分布。
 - 配置：实现文件只读取配置，不重复定义配置文件已有默认值。
 - 字段：嵌入层必须使用 `trajectory_vocab_normalized`，不能直接使用物理空间或 Symlog 字段替代。
@@ -140,6 +143,7 @@ $$
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-07 | 1os3_Codex | AI 完成：强制轨迹词表嵌入和解码组件在 FP32 下运行，避免外层 BF16 autocast 影响高频编码精度。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：将轨迹词表高频编码改为 $2\pi / 10^{i/64}$ 频带，并按 `[phi_y(y), phi_x(x)]` 拼接。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：改为复用公共 `model/swiglu.py` 中的 `SwiGLU` 激活。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：将模型侧轨迹词表模块移动到 `model/trajectory_vocab/`，与词表 `.npz` 同目录。 |

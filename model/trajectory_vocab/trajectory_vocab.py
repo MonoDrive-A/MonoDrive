@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import math
 from pathlib import Path
@@ -154,6 +155,32 @@ class TrajectoryDecoderOutput(NamedTuple):
     residuals: torch.Tensor
 
 
+def _disabled_autocast(reference_tensor: torch.Tensor) -> Any:
+    """根据参考张量设备构造禁用 autocast 的上下文。"""
+
+    if reference_tensor.device.type == "meta":
+        return nullcontext()
+    try:
+        return torch.autocast(device_type=reference_tensor.device.type, enabled=False)
+    except (RuntimeError, ValueError):
+        return nullcontext()
+
+
+def _force_floating_tensors_to_float32(module: nn.Module) -> None:
+    """将模块内所有浮点参数、buffer 和已有梯度恢复为 FP32。"""
+
+    with torch.no_grad():
+        for parameter in module.parameters(recurse=True):
+            if parameter.is_floating_point() and parameter.dtype != torch.float32:
+                parameter.data = parameter.data.to(dtype=torch.float32)
+            if parameter.grad is not None and parameter.grad.is_floating_point():
+                parameter.grad.data = parameter.grad.data.to(dtype=torch.float32)
+
+        for buffer in module.buffers(recurse=True):
+            if buffer.is_floating_point() and buffer.dtype != torch.float32:
+                buffer.data = buffer.data.to(dtype=torch.float32)
+
+
 class TrajectoryVocabularyEmbedding(nn.Module):
     """将归一化轨迹词表编码为轨迹查询特征。
 
@@ -196,6 +223,12 @@ class TrajectoryVocabularyEmbedding(nn.Module):
         )
         self.activation = SwiGLU()
         self.linear_out = nn.Linear(config.swiglu_hidden_dim, config.hidden_dim)
+        _force_floating_tensors_to_float32(self)
+
+    def _apply(self, fn: Any) -> "TrajectoryVocabularyEmbedding":
+        super()._apply(fn)
+        _force_floating_tensors_to_float32(self)
+        return self
 
     def forward(self) -> torch.Tensor:
         """输出 256 条轨迹查询嵌入。
@@ -206,16 +239,18 @@ class TrajectoryVocabularyEmbedding(nn.Module):
         `[V, K * 2 * frequency_count * 2]`。
         """
 
-        trajectory_x = self.trajectory_vocab_normalized[..., 0]
-        trajectory_y = self.trajectory_vocab_normalized[..., 1]
-        y_features = self._encode_coordinate(trajectory_y)
-        x_features = self._encode_coordinate(trajectory_x)
-        # [V, K, 2F] + [V, K, 2F] -> [V, K, 4F]，每步顺序为 [phi_y, phi_x]。
-        per_step_features = torch.cat((y_features, x_features), dim=-1)
-        # [V, K, 4F] -> [V, K * 2 * 2F]
-        high_frequency_features = per_step_features.reshape(self.config.num_trajectories, -1)
-        hidden_features = self.activation(self.linear_in(high_frequency_features))
-        trajectory_queries = self.linear_out(hidden_features)
+        with _disabled_autocast(self.trajectory_vocab_normalized):
+            trajectory_vocab_normalized = self.trajectory_vocab_normalized.to(dtype=torch.float32)
+            trajectory_x = trajectory_vocab_normalized[..., 0]
+            trajectory_y = trajectory_vocab_normalized[..., 1]
+            y_features = self._encode_coordinate(trajectory_y)
+            x_features = self._encode_coordinate(trajectory_x)
+            # [V, K, 2F] + [V, K, 2F] -> [V, K, 4F]，每步顺序为 [phi_y, phi_x]。
+            per_step_features = torch.cat((y_features, x_features), dim=-1)
+            # [V, K, 4F] -> [V, K * 2 * 2F]
+            high_frequency_features = per_step_features.reshape(self.config.num_trajectories, -1)
+            hidden_features = self.activation(self.linear_in(high_frequency_features))
+            trajectory_queries = self.linear_out(hidden_features)
         return trajectory_queries
 
     def _encode_coordinate(self, coordinates: torch.Tensor) -> torch.Tensor:
@@ -228,7 +263,9 @@ class TrajectoryVocabularyEmbedding(nn.Module):
         """
 
         # [V, K] -> [V, K, F]
-        encoded_angles = coordinates[..., None] * self.frequency_bands
+        encoded_angles = coordinates.to(dtype=torch.float32)[..., None] * self.frequency_bands.to(
+            dtype=torch.float32
+        )
         # [V, K, F] -> [V, K, F, 2] -> [V, K, 2F]
         encoded_features = torch.stack(
             (torch.sin(encoded_angles), torch.cos(encoded_angles)),
@@ -259,6 +296,12 @@ class TrajectoryVocabularyDecoder(nn.Module):
         self.output_linear = nn.Linear(config.hidden_dim, 1 + config.residual_dim)
         self.residual_activation = nn.Tanh()
         self._reset_output_initialization()
+        _force_floating_tensors_to_float32(self)
+
+    def _apply(self, fn: Any) -> "TrajectoryVocabularyDecoder":
+        super()._apply(fn)
+        _force_floating_tensors_to_float32(self)
+        return self
 
     def forward(self, trajectory_features: torch.Tensor) -> TrajectoryDecoderOutput:
         """解码轨迹词表输出。
@@ -283,15 +326,17 @@ class TrajectoryVocabularyDecoder(nn.Module):
                 f"期望 {self.config.hidden_dim}，实际为 {trajectory_features.shape[2]}。"
             )
 
-        decoded_features = self.output_linear(trajectory_features)
-        logits = decoded_features[..., 0]
-        residual_features = decoded_features[..., 1:].reshape(
-            trajectory_features.shape[0],
-            self.config.num_trajectories,
-            self.config.future_points,
-            self.config.trajectory_dim,
-        )
-        residuals = self.residual_activation(residual_features)
+        with _disabled_autocast(trajectory_features):
+            trajectory_features_fp32 = trajectory_features.to(dtype=torch.float32)
+            decoded_features = self.output_linear(trajectory_features_fp32)
+            logits = decoded_features[..., 0]
+            residual_features = decoded_features[..., 1:].reshape(
+                trajectory_features.shape[0],
+                self.config.num_trajectories,
+                self.config.future_points,
+                self.config.trajectory_dim,
+            )
+            residuals = self.residual_activation(residual_features)
         return TrajectoryDecoderOutput(logits=logits, residuals=residuals)
 
     def _reset_output_initialization(self) -> None:
