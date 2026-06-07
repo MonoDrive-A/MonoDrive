@@ -1,0 +1,93 @@
+[query]
+hidden_dim = 384
+agent_query_count = 48
+map_query_count = 48
+token_order = "agent_then_map"
+
+[query_embedding]
+anchor_feature_order = [
+  "x_symlog",
+  "y_symlog",
+  "radius_normalized",
+  "angle_normalized",
+  "sin_angle",
+  "cos_angle",
+  "is_agent",
+  "is_map",
+  "query_progress",
+]
+unfilled_value = 0.0
+
+[agent]
+class_names = ["car", "bicycle", "pedestrian"]
+none_class_name = "none"
+state_order = [
+  "x",
+  "y",
+  "length_log1p",
+  "width_log1p",
+  "height_log1p",
+  "sin_yaw",
+  "cos_yaw",
+  "vx",
+  "vy",
+  "ax",
+  "ay",
+]
+future_mode_count = 4
+future_points = 6
+trajectory_dim = 2
+
+[agent_query_initialization]
+angle_min_deg = -60.0
+angle_max_deg = 60.0
+radial_min_m = 4.0
+radial_max_m = 32.0
+radial_count = 6
+angle_count = 8
+spatial_order = "radius_major_angle_minor"
+
+[agent_state_initialization]
+position_source = "query_anchor_symlog"
+yaw_source = "query_angle"
+size_lwh_m = [4.5, 1.8, 1.6]
+velocity_xy_mps = [0.0, 0.0]
+acceleration_xy_mps2 = [0.0, 0.0]
+continuous_transform = "symlog"
+size_transform = "log1p"
+
+[agent_decoder_initialization]
+class_logit_init_value = 0.0
+none_logit_init_value = 0.0
+mode_logit_init_value = 0.0
+
+[agent_mode_initialization]
+mode_angles_deg = [-60.0, -20.0, 20.0, 60.0]
+future_distances_m = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+future_transform = "symlog"
+
+[map]
+class_names = ["lane_divider", "road_edge", "centerline"]
+none_class_name = "none"
+point_count = 100
+point_dim = 2
+
+[map_query_initialization]
+angle_min_deg = -60.0
+angle_max_deg = 60.0
+radial_min_m = 4.0
+radial_max_m = 32.0
+radial_count = 6
+angle_count = 8
+spatial_order = "radius_major_angle_minor"
+
+[map_point_initialization]
+point_source = "query_anchor_symlog"
+point_transform = "symlog"
+
+[map_decoder_initialization]
+class_logit_init_value = 0.0
+none_logit_init_value = 0.0
+
+[precision]
+decoder_dtype = "float32"
