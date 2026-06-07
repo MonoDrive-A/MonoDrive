@@ -2,7 +2,7 @@
 
 ## 1. 文件职责
 
-`visualization/backbone_feature_pca_viewer.py` 负责对统一序列 Transformer 主干做 FP32 诊断可视化。它读取 B2D H5 样本，加载 `config/backbone.toml`，临时把主干、注意力和视觉嵌入精度覆盖为 FP32，然后直接调用 `MonoDriveBackbone`，收集每层 Transformer 输出后的视觉 Token，并将每层特征图 PCA 到 RGB 后导出 PNG。
+`visualization/backbone_feature_pca_viewer.py` 负责对统一序列 Transformer 主干做 FP32 诊断可视化。它读取 B2D H5 样本，加载 `config/backbone.toml`，临时把主干、注意力和视觉嵌入精度覆盖为 FP32，然后直接调用 `MonoDriveBackbone`，收集每层 Transformer 输出后的视觉 Token，并将每层特征图 PCA 到 RGB 后导出 PNG。同时，它会把模型检测、地图和轨迹输出转换为 ego 米制 BEV 诊断图，便于观察输出头是否连通。
 
 该文件不复制主干、DINOv3、RoPE、检测头或轨迹词表逻辑。
 
@@ -10,6 +10,7 @@
 
 | 名称 | 类型 | 说明 |
 | --- | --- | --- |
+| `ModelOutputVisualizationData` | dataclass | 模型输出 BEV 可视化所需的轨迹、Agent 和 Map 预测。 |
 | `BackboneFeaturePCAVisualizationData` | dataclass | 渲染 PNG 所需的样本、shape、精度和 PCA 图。 |
 | `run_backbone_feature_pca_sample` | function | 调用真实主干并收集每层视觉 Token PCA 数据。 |
 | `render_backbone_feature_pca_sample` | function | 运行主干并保存 PNG。 |
@@ -25,6 +26,19 @@
   - `images`: `[8, H, W, 3]`。
   - `layer_pca_images`: `[12, 4, 288, 512, 3]`。
   - `layer_token_norms`: `[12, 4, 18, 32]`。
+  - `model_outputs.top_trajectory_points`: `[5, 6, 2]`。
+  - `model_outputs.agent_boxes`: `[12, 6]`。
+  - `model_outputs.map_points`: `[12, 100, 2]`。
+
+### `ModelOutputVisualizationData`
+
+- 功能：保存模型输出 BEV 面板需要的预测结果。
+- 输入：由 `_summarize_model_outputs` 从 `MonoDriveBackboneOutput` 构造。
+- Shape：
+  - `top_trajectory_points`: `[K, 6, 2]`，ego 坐标系米制轨迹。
+  - `agent_boxes`: `[A, 6]`，`[x, y, l, w, h, yaw]`。
+  - `agent_future_points`: `[A, 6, 2]`，ego 坐标系米制 future。
+  - `map_points`: `[M, 100, 2]`，ego 坐标系米制 Map 点。
 
 ### `run_backbone_feature_pca_sample`
 
@@ -48,6 +62,9 @@
 | `backbone_output.sequence_features` | `[1, 2662, 384]` | 统一主干输出。 |
 | `backbone_output.layer_vision_features` | 12 项 `[1, 2304, 384]` | 每层视觉 Token。 |
 | `layer_pca_images` | `[12, 4, 288, 512, 3]` | 每层每个 latent 时间片的 PCA RGB 图。 |
+| `top_trajectory_points` | `[5, 6, 2]` | 轨迹 top-k，词表 Symlog 加残差后反 Symlog 到米制。 |
+| `agent_boxes` | `[12, 6]` | Agent top-k，按非 none 概率排序，坐标和尺寸反变换后用于 BEV。 |
+| `map_points` | `[12, 100, 2]` | Map top-k，按非 none 概率排序，点坐标反 Symlog 后用于 BEV。 |
 | 输出 PNG | image file | 主干诊断图。 |
 
 ## 5. 关键实现逻辑
@@ -55,6 +72,8 @@
 脚本通过 `B2DH5Dataset` 读取真实 H5 样本，并保持 Dataset 图像归一化到 `[0, 1]`。加载主干配置后，使用 `override_backbone_precision` 把主干和注意力精度覆盖为 FP32，同时把视觉嵌入配置中的 DINOv3 和卷积精度覆盖为 FP32。其余结构配置保持来自配置文件。
 
 模型调用路径是 `MonoDriveBackbone(..., return_layer_features=True)`。每层视觉 Token 根据 `latent_grid_shape` reshape 为 `[T, H, W, D]`，再转为 `[D, T, H, W]` 做通道 PCA。PCA 只用于诊断，不参与模型训练或推理逻辑。
+
+模型输出 BEV 面板从同一次 `MonoDriveBackboneOutput` 中读取检测和轨迹输出。轨迹使用 Softmax 选择 top-k 词表项，把 `trajectory_vocab_symlog + predicted_residual` 反 Symlog 到米制轨迹。Agent 输出按非 none 概率选择 top-k，对 `x/y/v/future` 使用反 Symlog、对 `l/w/h` 使用 `expm1`，并用 `[sin_yaw, cos_yaw]` 反求 yaw。Map 输出按非 none 概率选择 top-k，对点坐标反 Symlog 后绘制 polyline。
 
 输出路径通过项目根目录校验，默认写入 `visualization/outputs/backbone_feature_pca/`。
 
@@ -80,7 +99,8 @@
 ## 8. 注意事项
 
 - 本脚本固定以 FP32 调用主干和视觉嵌入，避免本机 BF16 过慢。
-- 诊断图中的 PCA RGB 只用于观察特征空间结构，不代表注意力权重、loss 或物理空间预测。
+- 诊断图中的 PCA RGB 只用于观察特征空间结构，不代表注意力权重或 loss。
+- 模型输出 BEV 面板只做诊断级反变换和 top-k 展示，不替代正式推理后处理、NMS、Hungarian matching 或安全过滤。
 - CPU 上运行会加载 DINOv3 和完整 12 层主干，可能耗时较长。
 - 修改主干输出、层特征收集或命令行参数时，必须同步更新摘要文档和 `doc/Code Doc/Index.md`。
 
@@ -88,4 +108,5 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-07 | 1os3_Codex | AI 完成：新增模型输出 BEV 面板，展示轨迹 top-k、Agent top-k 和 Map top-k 预测。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增统一主干每层视觉特征 FP32 PCA 可视化工具文档。 |

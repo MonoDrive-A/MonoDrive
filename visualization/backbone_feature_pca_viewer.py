@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import sys
 from typing import Any
@@ -29,6 +30,50 @@ from model.vision_embedding import (
     override_vision_embedding_precision,
 )
 
+AGENT_CLASS_COLORS = {
+    0: (245, 128, 42),
+    1: (34, 168, 92),
+    2: (224, 64, 72),
+}
+MAP_CLASS_COLORS = {
+    0: (20, 184, 166),
+    1: (100, 116, 139),
+    2: (14, 165, 233),
+}
+TRAJECTORY_COLORS = [
+    (37, 99, 235),
+    (14, 165, 233),
+    (22, 163, 74),
+    (234, 179, 8),
+    (220, 38, 38),
+]
+
+
+@dataclass(frozen=True)
+class ModelOutputVisualizationData:
+    """模型输出可视化所需的数据。
+
+    Shape:
+        `top_trajectory_points`: `[K, 6, 2]`，ego 坐标系米制轨迹。
+        `agent_boxes`: `[A, 6]`，`[x, y, l, w, h, yaw]`。
+        `agent_future_points`: `[A, 6, 2]`，ego 坐标系米制 Agent future。
+        `map_points`: `[M, 100, 2]`，ego 坐标系米制 Map 点。
+    """
+
+    target_point: np.ndarray
+    future_trajectory: np.ndarray
+    top_trajectory_indices: np.ndarray
+    top_trajectory_scores: np.ndarray
+    top_trajectory_points: np.ndarray
+    agent_scores: np.ndarray
+    agent_class_ids: np.ndarray
+    agent_boxes: np.ndarray
+    agent_mode_ids: np.ndarray
+    agent_future_points: np.ndarray
+    map_scores: np.ndarray
+    map_class_ids: np.ndarray
+    map_points: np.ndarray
+
 
 @dataclass(frozen=True)
 class BackboneFeaturePCAVisualizationData:
@@ -38,6 +83,7 @@ class BackboneFeaturePCAVisualizationData:
         `images`: `[8, H, W, 3]`，RGB uint8 图像。
         `layer_pca_images`: `[L, T_latent, H, W, 3]`，每层视觉 Token PCA RGB 上采样图。
         `layer_token_norms`: `[L, T_latent, H_patch, W_patch]`，每层视觉 Token L2 norm。
+        `model_outputs`: 检测、轨迹和地图预测的 BEV 可视化数据。
     """
 
     scene_name: str
@@ -62,6 +108,7 @@ class BackboneFeaturePCAVisualizationData:
     conv_dtype: str
     layer_pca_images: np.ndarray
     layer_token_norms: np.ndarray
+    model_outputs: ModelOutputVisualizationData
 
 
 def run_backbone_feature_pca_sample(
@@ -129,6 +176,11 @@ def run_backbone_feature_pca_sample(
         backbone_output,
         output_size=display_images.shape[1:3],
     )
+    model_outputs = _summarize_model_outputs(
+        backbone_output,
+        model,
+        sample,
+    )
     return BackboneFeaturePCAVisualizationData(
         scene_name=str(sample["scene_name"]),
         h5_path=resolved_h5_path,
@@ -154,6 +206,7 @@ def run_backbone_feature_pca_sample(
         conv_dtype=fp32_vision_config.conv_dtype,
         layer_pca_images=layer_pca_images,
         layer_token_norms=layer_token_norms,
+        model_outputs=model_outputs,
     )
 
 
@@ -187,7 +240,7 @@ def render_visualization(data: BackboneFeaturePCAVisualizationData) -> Image.Ima
 
     font = ImageFont.load_default()
     canvas_width = 1780
-    canvas_height = 1360
+    canvas_height = 1680
     margin = 24
     canvas = Image.new("RGB", (canvas_width, canvas_height), (248, 250, 252))
     draw = ImageDraw.Draw(canvas)
@@ -218,9 +271,233 @@ def render_visualization(data: BackboneFeaturePCAVisualizationData) -> Image.Ima
     layer_grid_origin = (margin + 560, 70)
     _draw_layer_grid(canvas, draw, layer_grid_origin, data, font)
 
-    norm_origin = (margin, 1010)
+    outputs_origin = (margin, 970)
+    _draw_model_outputs_panel(canvas, draw, outputs_origin, data.model_outputs, font)
+
+    norm_origin = (margin + 560, 1290)
     _draw_norm_summary(draw, norm_origin, data, font)
     return canvas
+
+
+@dataclass(frozen=True)
+class _OutputBevConfig:
+    """模型输出 BEV 面板配置，坐标为 ego 米制坐标系。"""
+
+    x_min: float = -10.0
+    x_max: float = 90.0
+    y_min: float = -40.0
+    y_max: float = 40.0
+    width: int = 512
+    height: int = 512
+    grid_step: float = 10.0
+
+
+class _OutputBevTransform:
+    def __init__(self, config: _OutputBevConfig) -> None:
+        self.config = config
+
+    def to_pixel(self, ego_x: float, ego_y: float) -> tuple[int, int]:
+        x_ratio = (ego_y - self.config.y_min) / (self.config.y_max - self.config.y_min)
+        y_ratio = (self.config.x_max - ego_x) / (self.config.x_max - self.config.x_min)
+        pixel_x = int(round(x_ratio * (self.config.width - 1)))
+        pixel_y = int(round(y_ratio * (self.config.height - 1)))
+        return pixel_x, pixel_y
+
+    def in_view(self, ego_x: float, ego_y: float) -> bool:
+        return (
+            self.config.x_min <= ego_x <= self.config.x_max
+            and self.config.y_min <= ego_y <= self.config.y_max
+        )
+
+
+def _draw_model_outputs_panel(
+    canvas: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    origin: tuple[int, int],
+    outputs: ModelOutputVisualizationData,
+    font: ImageFont.ImageFont,
+) -> None:
+    x0, y0 = origin
+    config = _OutputBevConfig()
+    transform = _OutputBevTransform(config)
+    panel = Image.new("RGB", (config.width, config.height), (255, 255, 255))
+    panel_draw = ImageDraw.Draw(panel)
+
+    _draw_output_grid(panel_draw, transform, config, font)
+    _draw_output_ego(panel_draw, transform)
+    _draw_output_maps(panel_draw, transform, outputs)
+    _draw_output_trajectories(panel_draw, transform, outputs)
+    _draw_output_agents(panel_draw, transform, outputs)
+    _draw_output_target(panel_draw, transform, outputs.target_point, "target", (22, 163, 74), font)
+
+    panel_draw.rectangle([0, 0, config.width - 1, config.height - 1], outline=(100, 116, 139), width=2)
+    canvas.paste(panel, origin)
+    _draw_panel_label(draw, origin, "model outputs BEV", font)
+
+    legend_y = y0 + config.height + 12
+    draw.rounded_rectangle(
+        [x0, legend_y, x0 + config.width, legend_y + 172],
+        radius=8,
+        fill=(255, 255, 255),
+        outline=(203, 213, 225),
+    )
+    draw.text((x0 + 14, legend_y + 12), "output summary", fill=(15, 23, 42), font=font)
+    lines = [
+        _format_top_trajectory_line(outputs),
+        f"agents shown = {len(outputs.agent_scores)}, maps shown = {len(outputs.map_scores)}",
+        "trajectory = vocab_symlog + predicted residual, then inverse Symlog",
+        "agent/map coordinates are inverse Symlog or expm1 decoded for visualization only",
+        "model is untrained unless weights were loaded before running this viewer",
+    ]
+    for line_index, line in enumerate(lines):
+        draw.text((x0 + 14, legend_y + 40 + line_index * 24), line, fill=(51, 65, 85), font=font)
+
+
+def _draw_output_grid(
+    draw: ImageDraw.ImageDraw,
+    transform: _OutputBevTransform,
+    config: _OutputBevConfig,
+    font: ImageFont.ImageFont,
+) -> None:
+    grid_color = (226, 232, 240)
+    axis_color = (100, 116, 139)
+    x_value = math.ceil(config.x_min / config.grid_step) * config.grid_step
+    while x_value <= config.x_max:
+        p0 = transform.to_pixel(x_value, config.y_min)
+        p1 = transform.to_pixel(x_value, config.y_max)
+        color = axis_color if math.isclose(x_value, 0.0, abs_tol=1e-6) else grid_color
+        draw.line([p0, p1], fill=color, width=1)
+        draw.text((4, p0[1] - 8), f"x={x_value:.0f}", fill=(100, 116, 139), font=font)
+        x_value += config.grid_step
+
+    y_value = math.ceil(config.y_min / config.grid_step) * config.grid_step
+    while y_value <= config.y_max:
+        p0 = transform.to_pixel(config.x_min, y_value)
+        p1 = transform.to_pixel(config.x_max, y_value)
+        color = axis_color if math.isclose(y_value, 0.0, abs_tol=1e-6) else grid_color
+        draw.line([p0, p1], fill=color, width=1)
+        y_value += config.grid_step
+
+
+def _draw_output_ego(draw: ImageDraw.ImageDraw, transform: _OutputBevTransform) -> None:
+    center = transform.to_pixel(0.0, 0.0)
+    triangle = [
+        transform.to_pixel(2.2, 0.0),
+        transform.to_pixel(-1.4, -1.0),
+        transform.to_pixel(-1.4, 1.0),
+    ]
+    draw.polygon(triangle, fill=(15, 23, 42), outline=(15, 23, 42))
+    draw.ellipse([center[0] - 3, center[1] - 3, center[0] + 3, center[1] + 3], fill=(255, 255, 255))
+
+
+def _draw_output_trajectories(
+    draw: ImageDraw.ImageDraw,
+    transform: _OutputBevTransform,
+    outputs: ModelOutputVisualizationData,
+) -> None:
+    gt_points = [transform.to_pixel(float(point[0]), float(point[1])) for point in outputs.future_trajectory]
+    if gt_points:
+        draw.line([transform.to_pixel(0.0, 0.0), *gt_points], fill=(15, 23, 42), width=3)
+    for trajectory_index, trajectory_points in enumerate(outputs.top_trajectory_points):
+        color = TRAJECTORY_COLORS[trajectory_index % len(TRAJECTORY_COLORS)]
+        pixels = [transform.to_pixel(float(point[0]), float(point[1])) for point in trajectory_points]
+        if pixels:
+            draw.line([transform.to_pixel(0.0, 0.0), *pixels], fill=color, width=2)
+        for point in pixels:
+            draw.ellipse([point[0] - 3, point[1] - 3, point[0] + 3, point[1] + 3], fill=color)
+
+
+def _draw_output_agents(
+    draw: ImageDraw.ImageDraw,
+    transform: _OutputBevTransform,
+    outputs: ModelOutputVisualizationData,
+) -> None:
+    for agent_index, box in enumerate(outputs.agent_boxes):
+        class_id = int(outputs.agent_class_ids[agent_index])
+        color = AGENT_CLASS_COLORS.get(class_id, (71, 85, 105))
+        future_points = outputs.agent_future_points[agent_index]
+        center_xy = box[:2]
+        future_pixels = [
+            transform.to_pixel(float(point[0]), float(point[1]))
+            for point in future_points
+            if transform.in_view(float(point[0]), float(point[1]))
+        ]
+        if future_pixels:
+            start = transform.to_pixel(float(center_xy[0]), float(center_xy[1]))
+            draw.line([start, *future_pixels], fill=color, width=1)
+        _draw_output_agent_box(draw, transform, box, color)
+        label_point = transform.to_pixel(float(center_xy[0]), float(center_xy[1]))
+        draw.text(
+            (label_point[0] + 4, label_point[1] - 8),
+            f"{float(outputs.agent_scores[agent_index]):.2f}",
+            fill=color,
+        )
+
+
+def _draw_output_agent_box(
+    draw: ImageDraw.ImageDraw,
+    transform: _OutputBevTransform,
+    box: np.ndarray,
+    color: tuple[int, int, int],
+) -> None:
+    center_x, center_y, length, width, _height, yaw = [float(value) for value in box[:6]]
+    if not transform.in_view(center_x, center_y):
+        return
+    half_length = max(length, 0.2) / 2.0
+    half_width = max(width, 0.2) / 2.0
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    corners = []
+    for local_x, local_y in (
+        (half_length, half_width),
+        (half_length, -half_width),
+        (-half_length, -half_width),
+        (-half_length, half_width),
+    ):
+        ego_x = center_x + local_x * cos_yaw - local_y * sin_yaw
+        ego_y = center_y + local_x * sin_yaw + local_y * cos_yaw
+        corners.append(transform.to_pixel(ego_x, ego_y))
+    draw.polygon(corners, outline=color)
+    draw.line([corners[0], corners[3]], fill=color, width=2)
+
+
+def _draw_output_maps(
+    draw: ImageDraw.ImageDraw,
+    transform: _OutputBevTransform,
+    outputs: ModelOutputVisualizationData,
+) -> None:
+    for map_index, points_xy in enumerate(outputs.map_points):
+        class_id = int(outputs.map_class_ids[map_index])
+        color = MAP_CLASS_COLORS.get(class_id, (100, 116, 139))
+        pixels = [
+            transform.to_pixel(float(point_xy[0]), float(point_xy[1]))
+            for point_xy in points_xy
+            if transform.in_view(float(point_xy[0]), float(point_xy[1]))
+        ]
+        if len(pixels) >= 2:
+            draw.line(pixels, fill=color, width=1)
+
+
+def _draw_output_target(
+    draw: ImageDraw.ImageDraw,
+    transform: _OutputBevTransform,
+    point_xy: np.ndarray,
+    label: str,
+    color: tuple[int, int, int],
+    font: ImageFont.ImageFont,
+) -> None:
+    point = transform.to_pixel(float(point_xy[0]), float(point_xy[1]))
+    size = 7
+    draw.line([point[0] - size, point[1], point[0] + size, point[1]], fill=color, width=2)
+    draw.line([point[0], point[1] - size, point[0], point[1] + size], fill=color, width=2)
+    draw.text((point[0] + 8, point[1] - 8), label, fill=color, font=font)
+
+
+def _format_top_trajectory_line(outputs: ModelOutputVisualizationData) -> str:
+    items = []
+    for trajectory_index, score in zip(outputs.top_trajectory_indices, outputs.top_trajectory_scores, strict=False):
+        items.append(f"{int(trajectory_index)}:{float(score):.3f}")
+    return "top trajectories = " + ", ".join(items)
 
 
 def _draw_history_strip(
@@ -371,6 +648,126 @@ def _draw_norm_summary(
         fill=(51, 65, 85),
         font=font,
     )
+
+
+def _summarize_model_outputs(
+    backbone_output: MonoDriveBackboneOutput,
+    model: MonoDriveBackbone,
+    sample: dict[str, Any],
+    trajectory_top_k: int = 5,
+    agent_top_k: int = 12,
+    map_top_k: int = 12,
+) -> ModelOutputVisualizationData:
+    """把模型空间输出转换为 BEV 诊断图使用的米制数据。"""
+
+    trajectory_indices, trajectory_scores, trajectory_points = _summarize_trajectory_outputs(
+        backbone_output,
+        model,
+        trajectory_top_k,
+    )
+    agent_scores, agent_class_ids, agent_boxes, agent_mode_ids, agent_future_points = _summarize_agent_outputs(
+        backbone_output,
+        agent_top_k,
+    )
+    map_scores, map_class_ids, map_points = _summarize_map_outputs(backbone_output, map_top_k)
+    return ModelOutputVisualizationData(
+        target_point=_tensor_to_numpy(sample["target_point"]).astype(np.float32, copy=False),
+        future_trajectory=_tensor_to_numpy(sample["future_trajectory"]).astype(np.float32, copy=False),
+        top_trajectory_indices=trajectory_indices,
+        top_trajectory_scores=trajectory_scores,
+        top_trajectory_points=trajectory_points,
+        agent_scores=agent_scores,
+        agent_class_ids=agent_class_ids,
+        agent_boxes=agent_boxes,
+        agent_mode_ids=agent_mode_ids,
+        agent_future_points=agent_future_points,
+        map_scores=map_scores,
+        map_class_ids=map_class_ids,
+        map_points=map_points,
+    )
+
+
+def _summarize_trajectory_outputs(
+    backbone_output: MonoDriveBackboneOutput,
+    model: MonoDriveBackbone,
+    top_k: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    logits = backbone_output.trajectory_output.logits[0].detach().to(dtype=torch.float32).cpu()
+    residuals = backbone_output.trajectory_output.residuals[0].detach().to(dtype=torch.float32).cpu()
+    probabilities = torch.softmax(logits, dim=-1)
+    selected_count = min(top_k, int(probabilities.numel()))
+    scores, indices = torch.topk(probabilities, k=selected_count)
+    vocab_symlog = model.vocabulary.trajectory_vocab_symlog.detach().to(dtype=torch.float32).cpu()
+    selected_symlog = vocab_symlog[indices] + residuals[indices]
+    trajectory_points = _inverse_symlog(selected_symlog)
+    return (
+        indices.numpy().astype(np.int32, copy=False),
+        scores.numpy().astype(np.float32, copy=False),
+        trajectory_points.numpy().astype(np.float32, copy=False),
+    )
+
+
+def _summarize_agent_outputs(
+    backbone_output: MonoDriveBackboneOutput,
+    top_k: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    detection_output = backbone_output.detection_output
+    class_logits = detection_output.agent_class_logits[0].detach().to(dtype=torch.float32).cpu()
+    states = detection_output.agent_states[0].detach().to(dtype=torch.float32).cpu()
+    mode_logits = detection_output.agent_mode_logits[0].detach().to(dtype=torch.float32).cpu()
+    futures = detection_output.agent_future_trajectories[0].detach().to(dtype=torch.float32).cpu()
+
+    class_probabilities = torch.softmax(class_logits, dim=-1)
+    foreground_probabilities = class_probabilities[:, :-1]
+    foreground_scores, class_ids = foreground_probabilities.max(dim=-1)
+    selected_count = min(top_k, int(foreground_scores.numel()))
+    selected_scores, selected_indices = torch.topk(foreground_scores, k=selected_count)
+    selected_class_ids = class_ids[selected_indices]
+
+    selected_states = states[selected_indices]
+    centers_xy = _inverse_symlog(selected_states[:, 0:2])
+    sizes_lwh = torch.expm1(selected_states[:, 2:5]).clamp(min=0.2, max=20.0)
+    yaw = torch.atan2(selected_states[:, 5], selected_states[:, 6]).unsqueeze(-1)
+    agent_boxes = torch.cat((centers_xy, sizes_lwh, yaw), dim=-1)
+
+    mode_probabilities = torch.softmax(mode_logits[selected_indices], dim=-1)
+    mode_ids = torch.argmax(mode_probabilities, dim=-1)
+    selected_futures = futures[selected_indices, mode_ids]
+    future_displacements = _inverse_symlog(selected_futures)
+    future_points = future_displacements + centers_xy[:, None, :]
+    return (
+        selected_scores.numpy().astype(np.float32, copy=False),
+        selected_class_ids.numpy().astype(np.int32, copy=False),
+        agent_boxes.numpy().astype(np.float32, copy=False),
+        mode_ids.numpy().astype(np.int32, copy=False),
+        future_points.numpy().astype(np.float32, copy=False),
+    )
+
+
+def _summarize_map_outputs(
+    backbone_output: MonoDriveBackboneOutput,
+    top_k: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    detection_output = backbone_output.detection_output
+    class_logits = detection_output.map_class_logits[0].detach().to(dtype=torch.float32).cpu()
+    points = detection_output.map_points[0].detach().to(dtype=torch.float32).cpu()
+    class_probabilities = torch.softmax(class_logits, dim=-1)
+    foreground_probabilities = class_probabilities[:, :-1]
+    foreground_scores, class_ids = foreground_probabilities.max(dim=-1)
+    selected_count = min(top_k, int(foreground_scores.numel()))
+    selected_scores, selected_indices = torch.topk(foreground_scores, k=selected_count)
+    selected_points = _inverse_symlog(points[selected_indices])
+    return (
+        selected_scores.numpy().astype(np.float32, copy=False),
+        class_ids[selected_indices].numpy().astype(np.int32, copy=False),
+        selected_points.numpy().astype(np.float32, copy=False),
+    )
+
+
+def _inverse_symlog(values: torch.Tensor) -> torch.Tensor:
+    """把 Symlog 空间张量反变换到米制物理空间。"""
+
+    return torch.sign(values) * torch.expm1(torch.abs(values))
 
 
 def _summarize_backbone_layers(
