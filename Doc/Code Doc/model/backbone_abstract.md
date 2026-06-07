@@ -2,7 +2,7 @@
 
 ## 1. 文件基本功能
 
-`model/backbone.py` 实现 MonoDrive 统一序列 Transformer 主干。它复用已有视觉嵌入、目标点嵌入、轨迹词表、检测查询和解码头，构造 2662 个 384 维 Token，执行 12 层 Pre-Norm Transformer，并输出检测和轨迹解码结果。
+`model/backbone.py` 实现 MonoDrive 统一序列 Transformer 主干。它复用已有视觉嵌入、目标点嵌入、轨迹词表、检测查询和解码头，构造 2662 个 384 维 Token，执行 12 层 Pre-Norm Transformer，并输出检测和轨迹解码结果。检测头输入由初始检测查询加骨干检测 Token 的零初始化线性残差构成。
 
 ## 2. 主要公开接口
 
@@ -23,6 +23,8 @@
 | `load_backbone_config` | TOML 路径 | `BackboneConfig` |
 | `override_backbone_precision` | `BackboneConfig` 和 dtype 名称 | 新的 `BackboneConfig` |
 
+检测解码内部使用 `initial_detection_queries: [B, 96, 384]` 与 `detection_residual_projection(detection_features): [B, 96, 384]` 相加。残差投影零初始化，因此初始化时检测头输入等于初始检测查询。
+
 ## 4. 公开接口使用规范
 
 | 接口 | 使用规范 |
@@ -39,6 +41,7 @@
 ## 6. 维护注意事项
 
 - RoPE 只作用于视觉 Token，基频从 `config/backbone.toml` 读取，当前为 `100.0`。
+- 检测残差投影层的初始权重和偏置必须为零；训练中该层正常学习残差。
 - FFN 结构必须保持为 $(D \rightarrow 4D)_{\mathrm{Layer1}} \rightarrow \mathrm{SwiGLU}(4D \rightarrow 2D) \rightarrow (2D \rightarrow D)_{\mathrm{Layer2}}$。
 - 模态独立 FFN 层索引是 0-based，当前为 `[1, 3, 5, 7, 9]`。
 - 修改 Token 数、shape、精度、RoPE 或解码口径时，同步更新完整文档、配置文档和 `doc/Code Doc/Index.md`。
@@ -47,4 +50,5 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-07 | 1os3_Codex | AI 完成：记录检测查询加零初始化残差的解码口径。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增统一序列 Transformer 主干摘要文档。 |
