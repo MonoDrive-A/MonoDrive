@@ -1,0 +1,33 @@
+[target_point]
+coordinate_dim = 2
+
+[grid]
+height = 18
+width = 16
+x_min_m = -4.0
+x_max_m = 32.0
+y_min_m = -32.0
+y_max_m = 32.0
+vector_order = "grid_minus_target"
+
+[convolution]
+feature_channels = 16
+conv1_kernel_size = [1, 1]
+conv1_stride = [1, 1]
+conv1_padding = [0, 0]
+conv2_kernel_size = [3, 3]
+conv2_stride = [1, 1]
+conv2_padding = [1, 1]
+downsample_kernel_size = [2, 2]
+downsample_stride = [2, 2]
+downsample_padding = [0, 0]
+output_height = 9
+output_width = 8
+
+[output]
+goal_token_count = 2
+hidden_dim = 384
+flatten_order = "channel_height_width"
+
+[precision]
+dtype = "float32"
