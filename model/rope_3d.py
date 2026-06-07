@@ -30,7 +30,7 @@ def apply_rope_3d(
         theta: RoPE 基频。
 
     Returns:
-        应用 3D RoPE 后的特征，shape 与 `features` 相同。
+        应用 3D RoPE 后的 FP32 特征，shape 与 `features` 相同。
 
     Shape:
         `features`: `[..., N, C]`
@@ -46,6 +46,11 @@ def apply_rope_3d(
         raise TypeError(f"features 必须为浮点张量，实际 dtype 为 {features.dtype}。")
     if not torch.is_floating_point(positions):
         raise TypeError(f"positions 必须为浮点张量，实际 dtype 为 {positions.dtype}。")
+    if features.device != positions.device:
+        raise ValueError(
+            "features 和 positions 必须位于同一设备，"
+            f"实际分别为 {features.device} 和 {positions.device}。"
+        )
     if features.ndim < 2:
         raise ValueError(
             f"features 期望 shape 为 [..., N, C]，实际 shape 为 {tuple(features.shape)}。"
@@ -69,17 +74,19 @@ def apply_rope_3d(
         )
     _validate_theta(theta)
 
+    features_fp32 = features.to(dtype=torch.float32)
+    positions_fp32 = positions.to(dtype=torch.float32)
     rotated_parts = []
     cursor = 0
     for axis_index, axis_dim in enumerate(validated_axis_dims):
         next_cursor = cursor + axis_dim
-        axis_features = features[..., cursor:next_cursor]
-        axis_positions = positions[..., axis_index]
+        axis_features = features_fp32[..., cursor:next_cursor]
+        axis_positions = positions_fp32[..., axis_index]
         rotated_parts.append(_apply_1d_rope(axis_features, axis_positions, axis_dim, theta))
         cursor = next_cursor
 
     if cursor < feature_dim:
-        rotated_parts.append(features[..., cursor:])
+        rotated_parts.append(features_fp32[..., cursor:])
     return torch.cat(rotated_parts, dim=-1)
 
 
@@ -94,7 +101,7 @@ class RoPE3D(nn.Module):
         `query`: `[..., N, C]`
         `key`: `[..., N, C]`
         `positions`: `[N, 3]` 或 `[..., N, 3]`
-        输出: 两个 shape 与输入一致的张量。
+        输出: 两个 shape 与输入一致的 FP32 张量。
     """
 
     def __init__(self, axis_dims: Sequence[int], theta: float) -> None:
@@ -137,10 +144,10 @@ def _apply_1d_rope(
         torch.tensor(float(theta), device=axis_positions.device, dtype=torch.float32),
         -2.0 * frequency_indices / float(axis_dim),
     )
-    angles = axis_positions.to(dtype=torch.float32)[..., None] * inv_frequencies
+    angles = axis_positions[..., None] * inv_frequencies
     angles = _align_angles_to_features(angles, axis_features)
-    cos_angles = torch.cos(angles).to(dtype=axis_features.dtype)
-    sin_angles = torch.sin(angles).to(dtype=axis_features.dtype)
+    cos_angles = torch.cos(angles)
+    sin_angles = torch.sin(angles)
 
     even_features = axis_features[..., 0::2]
     odd_features = axis_features[..., 1::2]

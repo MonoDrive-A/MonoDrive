@@ -2,7 +2,7 @@
 
 ## 1. 文件职责
 
-`model/rope_3d.py` 提供通用 3D RoPE 旋转位置编码实现。它只接收调用方已经准备好的三维位置坐标和 rotary 通道划分，对特征张量最后一维的前若干通道执行三轴旋转。
+`model/rope_3d.py` 提供通用 3D RoPE 旋转位置编码实现。它只接收调用方已经准备好的三维位置坐标和 rotary 通道划分，对特征张量最后一维的前若干通道执行三轴旋转，并强制以 FP32 输出。
 
 该文件不生成视觉网格，不做坐标中心化、归一化、`[H, W, T]` 排列转换、注意力头选择或配置文件加载。这些策略由 Transformer Block、位置构造模块或配置加载模块负责。
 
@@ -19,7 +19,7 @@
 
 - 功能：按三个坐标轴分别构造旋转角，对 `features[..., N, C]` 的前 `sum(axis_dims)` 个通道应用 RoPE。
 - 输入：`features`、`positions`、`axis_dims`、`theta`。
-- 输出：shape 与输入一致的特征张量。
+- 输出：shape 与输入一致的 FP32 特征张量。
 - Shape：`features` 为 `[..., N, C]`，`positions` 为 `[N, 3]` 或 `[..., N, 3]`。
 - 关键参数：`axis_dims` 三项必须为正偶数，`theta` 必须为正数。
 
@@ -27,7 +27,7 @@
 
 - 功能：保存 `axis_dims` 和 `theta`，并对 query / key 应用同一套 3D RoPE。
 - 输入：`query`、`key`、`positions`。
-- 输出：`rotated_query` 和 `rotated_key`。
+- 输出：FP32 的 `rotated_query` 和 `rotated_key`。
 - Shape：`query`、`key` 均为 `[..., N, C]`，两者 shape 必须一致。
 - 关键参数：`axis_dims` 和 `theta` 由调用方显式传入。
 
@@ -40,11 +40,11 @@
 | `axis_dims` | `[3]` | 三个坐标轴对应的 rotary 通道数。 |
 | rotary 部分 | `[..., N, sum(axis_dims)]` | 被 3D RoPE 旋转的通道。 |
 | tail 部分 | `[..., N, C - sum(axis_dims)]` | 未参与 RoPE 的剩余通道，原样保留。 |
-| 输出 | `[..., N, C]` | 与输入特征 shape 一致。 |
+| 输出 | `[..., N, C]` | 与输入特征 shape 一致，dtype 固定为 `torch.float32`。 |
 
 ## 5. 关键实现逻辑
 
-`apply_rope_3d` 首先校验输入为浮点张量、token 数一致、`axis_dims` 为 3 个正偶数且总和不超过特征通道数。随后按轴切分特征通道，并对每个轴独立执行 1D RoPE。
+`apply_rope_3d` 首先校验输入为浮点张量、`features` 和 `positions` 位于同一设备、token 数一致、`axis_dims` 为 3 个正偶数且总和不超过特征通道数。随后将特征和位置统一转换为 FP32，按轴切分特征通道，并对每个轴独立执行 1D RoPE。
 
 每个轴的频率使用如下形式：
 
@@ -87,11 +87,12 @@ $$
 - 坐标口径：调用方必须在进入本文件前完成坐标构造和归一化；本文件不假设坐标范围。
 - 轴顺序：`positions[..., 0:3]` 的含义由调用方约定；视觉 Token 可按 `[H, W, T]` 传入。
 - 头选择：若只希望部分注意力头使用 RoPE，应由调用方先切片或只对指定头调用本模块。
-- 精度：频率和三角函数以 FP32 计算，再转换回特征 dtype。
+- 精度：特征、位置、频率和三角函数均强制使用 FP32；输出不会转换回输入 dtype。
 - Shape：`sum(axis_dims)` 可以小于 `C`，未覆盖的通道会原样保留。
 
 ## 9. 维护记录
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-07 | 1os3_Codex | AI 完成：将 3D RoPE 旋转和输出强制为 FP32。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：新增通用 3D RoPE 旋转位置编码实现文档。 |
