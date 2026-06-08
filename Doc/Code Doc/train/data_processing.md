@@ -79,7 +79,7 @@
 
 Agent 匹配中，模型输出先恢复为 FP32 物理空间：位置、速度、加速度和 future 使用反 Symlog；尺寸使用 `expm1`；yaw 使用 sin/cos 向量 cost。匹配完成后，监督目标再写回模型训练空间。Agent future mask 保留 H5 中 `[K]` 逐点有效性，只在匹配 query 的 winner mode 写入 `[K]` mask，避免 padding 未来点进入 loss。
 
-Map 匹配中，预测点反 Symlog 到 ego meter 空间计算点误差。`lane_divider` 和 `road_edge` 按配置视为点序正反等价，cost 取正向和反向的较小值；`centerline` 保留方向。若无方向类别在匹配时反向点序误差更小，监督目标也会写入反向点序，保证 matching 和 loss 口径一致。
+Map 匹配中，预测点反 Symlog 到 ego meter 空间计算点误差。分类 cost 与 loss 一致，只在前景类 softmax 上取 `-log p(gt_class)`，并减去 objectness logit（`logsumexp(fg) - none`）以优先把 GT 分给更像前景的 query。`lane_divider` 和 `road_edge` 按配置视为点序正反等价，cost 取正向和反向的较小值；`centerline` 保留方向。若无方向类别在匹配时反向点序误差更小，监督目标也会写入反向点序，保证 matching 和 loss 口径一致。
 
 ## 6. 配置项
 
@@ -110,6 +110,7 @@ Map 匹配中，预测点反 Symlog 到 ego meter 空间计算点误差。`lane_
 | 2026-06-08 | 1os3_Codex | AI 完成：同步 Agent 16 / Map 32 检测监督 shape。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：轨迹 residual 目标改为除以 `symlog_scale` 的归一化空间，反解时乘回 `symlog_scale`。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增训练数据处理模块，支持 H5 样本过滤、轨迹词表标签、Agent/Map Hungarian matching，并移除危险轨迹判断。 |
+| 2026-06-08 | 1os3_Codex | AI 完成：Map 匹配改为前景 class cost 并加入 objectness 项。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：将 Agent future mask 改为 winner mode 逐点 mask，并让 Map 无方向类别监督沿用匹配时误差更小的点序。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：放开 H5 只读数据源路径限制，允许 `h5_dir` 和 `h5_paths` 使用项目外绝对路径。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：样本校验增加失败原因，并在读取阶段跳过单个无效样本。 |

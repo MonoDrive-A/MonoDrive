@@ -39,12 +39,12 @@ zero_grad_set_to_none = false
 [loss_weights]
 trajectory_logit_soft_ce = 0.1
 trajectory_residual_mse = 1.0
-agent_class_ce = 0.8
-agent_state_mse = 0.8
-agent_mode_ce = 0.8
-agent_future_mse = 0.8
-map_class_ce = 0.8
-map_point_mse = 0.8
+agent_class_ce = 1.0
+agent_state_mse = 1.0
+agent_mode_ce = 1.0
+agent_future_mse = 1.0
+map_class_ce = 1.0
+map_point_mse = 1.0
 
 [detection_class_weights]
 mode = "auto"

@@ -20,6 +20,9 @@ _AUTO_BACKGROUND_SCALE_MIN = 0.08
 _AUTO_BACKGROUND_SCALE_MAX = 1.0
 
 
+_MAP_CLASS_AUTO_SCALE_EXPONENT = 0.5
+
+
 __all__ = [
     "TrainingLossOutput",
     "MonoDriveTrainingLoss",
@@ -161,7 +164,7 @@ class MonoDriveTrainingLoss(nn.Module):
     ) -> torch.Tensor:
         logits = model_output.detection_output.map_class_logits.to(dtype=torch.float32)
         targets = labels.map.class_targets.to(device=logits.device, dtype=torch.long)
-        return _detection_class_cross_entropy(
+        loss = _detection_class_cross_entropy(
             logits=logits,
             targets=targets,
             none_index=int(logits.shape[-1]) - 1,
@@ -170,6 +173,16 @@ class MonoDriveTrainingLoss(nn.Module):
             none_weight=self.detection_class_weights.map_none_weight,
             name="map_class_ce",
         )
+        if self.detection_class_weights.mode != "auto":
+            return loss
+        point_count = int(model_output.detection_output.map_points.shape[-2])
+        point_dim = int(model_output.detection_output.map_points.shape[-1])
+        foreground_class_count = int(logits.shape[-1]) - 1
+        regression_dims = point_count * point_dim
+        auto_scale = (
+            regression_dims / max(foreground_class_count, 1)
+        ) ** _MAP_CLASS_AUTO_SCALE_EXPONENT
+        return loss * auto_scale
 
     def _map_point_mse(
         self,

@@ -600,7 +600,7 @@ def build_map_matching_targets(
     point_mask = torch.zeros((batch_size, query_count), device=device, dtype=torch.bool)
     matched_query_indices: list[torch.Tensor] = []
     matched_gt_indices: list[torch.Tensor] = []
-    class_cost_source = -torch.log_softmax(class_logits, dim=-1)
+    class_cost_source = -torch.log_softmax(class_logits[..., :none_index], dim=-1)
     bidirectional_class_indices = {
         detection_config.map_class_names.index(name)
         for name in data_config.map_bidirectional_class_names
@@ -616,6 +616,7 @@ def build_map_matching_targets(
 
         gt_class = gt_classes[batch_index, valid_gt_indices].clamp(min=0, max=none_index - 1)
         class_cost = class_cost_source[batch_index][:, gt_class]
+        objectness_logit = _detection_objectness_logit(class_logits[batch_index], none_index)
         point_cost, reverse_target_mask = _map_point_cost(
             pred_points[batch_index],
             gt_points[batch_index, valid_gt_indices],
@@ -625,6 +626,7 @@ def build_map_matching_targets(
         cost_matrix = (
             data_config.map_class_cost_weight * class_cost
             + data_config.map_point_cost_weight * point_cost
+            - data_config.map_class_cost_weight * objectness_logit[:, None]
         )
         query_indices, local_gt_indices = _linear_sum_assignment(cost_matrix)
         gt_indices = valid_gt_indices[local_gt_indices]
@@ -805,6 +807,16 @@ def _winner_agent_modes(
     denominator = valid.sum(dim=(2, 3)).clamp_min(1.0)
     mode_cost = squared.sum(dim=(2, 3)) / denominator
     return torch.argmin(mode_cost, dim=1)
+
+
+def _detection_objectness_logit(
+    class_logits: torch.Tensor,
+    none_index: int,
+) -> torch.Tensor:
+    """计算 ``logsumexp(fg) - none`` objectness logit，shape `[Q]`。"""
+
+    foreground_logits = class_logits[:, :none_index]
+    return torch.logsumexp(foreground_logits, dim=-1) - class_logits[:, none_index]
 
 
 def _map_point_cost(
