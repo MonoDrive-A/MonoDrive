@@ -2,7 +2,7 @@
 
 ## 1. 文件基本功能
 
-`visualization/backbone_feature_pca_viewer.py` 对统一序列 Transformer 主干做 FP32 诊断可视化。它读取 B2D H5 样本，临时把主干、注意力和视觉嵌入精度覆盖为 FP32，直接调用 `MonoDriveBackbone`，收集 12 层输出后的视觉 Token，并把每层视觉特征 PCA 到 RGB 后导出 PNG。它还会把同一次前向得到的轨迹、完整 48 个 Agent 查询和完整 48 个 Map 查询反变换到 ego 米制 BEV 中展示。
+`visualization/backbone_feature_pca_viewer.py` 对统一序列 Transformer 主干做 FP32 诊断可视化。它读取 B2D H5 样本，临时把主干、注意力和视觉嵌入精度覆盖为 FP32，可选从 checkpoint 加载真实训练权重，直接调用 `MonoDriveBackbone`，收集 12 层输出后的视觉 Token，并把每层视觉特征 PCA 到 RGB 后导出 PNG。它还会把同一次前向得到的轨迹、Agent 查询和 Map 查询反变换到 ego 米制 BEV 中展示；检测 query 先按包含 `none` 的完整类别 softmax argmax 定类，最高类别为 `none` 时不绘制。
 
 ## 2. 主要公开接口
 
@@ -19,7 +19,7 @@
 
 | 接口 | 输入 Shape | 输出 Shape |
 | --- | --- | --- |
-| `run_backbone_feature_pca_sample` | H5 样本图像 `[8, 3, 288, 512]`，目标点 `[2]`，自车运动 `[3]` | `layer_pca_images: [12, 4, 288, 512, 3]`，`layer_token_norms: [12, 4, 18, 32]`，模型输出 BEV 数据，默认含 48 个 Agent 和 48 个 Map |
+| `run_backbone_feature_pca_sample` | H5 样本图像 `[8, 3, 288, 512]`，目标点 `[2]`，自车运动 `[3]` | `layer_pca_images: [12, 4, 288, 512, 3]`，`layer_token_norms: [12, 4, 18, 32]`，模型输出 BEV 数据，默认最多检查 48 个 Agent 和 48 个 Map，并过滤 `none` |
 | `render_visualization` | `BackboneFeaturePCAVisualizationData` | PIL `Image` |
 | `render_backbone_feature_pca_sample` | H5 路径和样本索引 | PNG 文件 |
 
@@ -30,7 +30,7 @@
 | `run_backbone_feature_pca_sample` | 固定覆盖精度为 FP32，其余结构配置来自 `config/backbone.toml`。 |
 | `render_backbone_feature_pca_sample` | 输出路径必须位于项目目录内。 |
 | `render_visualization` | 只消费真实主干生成的数据，不执行模型逻辑。 |
-| `main` | 命令行运行，默认输出到项目内 `visualization/outputs/backbone_feature_pca/`，可用 `--agent-top-k` 和 `--map-top-k` 临时减少显示数量。 |
+| `main` | 命令行运行，默认输出到项目内 `visualization/outputs/backbone_feature_pca/`，可用 `--checkpoint` 加载真实模型权重，也可用 `--agent-top-k` 和 `--map-top-k` 临时减少显示数量。 |
 
 ## 5. 最小使用示例
 
@@ -40,13 +40,18 @@
 
 - 可视化必须继续调用 `MonoDriveBackbone`，不要复制主干或 RoPE 逻辑。
 - 脚本固定 FP32 运行，避免本机 BF16 过慢。
-- 模型输出 BEV 面板默认展示完整 48 个 Agent 和 48 个 Map，只做诊断级排序和反变换，不替代正式推理后处理。
+- 模型输出 BEV 面板默认最多检查 48 个 Agent 和 48 个 Map，只绘制最高概率类别不是 `none` 的 query，不替代正式推理后处理。
+- 每个检测 query 在包含 `none` 的完整类别 softmax 上取最高概率类别；`none` query 会被过滤，非 `none` 标签格式为 `class:probability`。
+- `--checkpoint` 严格加载模型 state dict，不允许结构不匹配时静默继续。
 - 修改输出统计或命令行参数时，同步更新完整文档和 `doc/Code Doc/Index.md`。
 
 ## 7. 维护记录
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：记录检测 BEV 面板过滤最高概率类别为 `none` 的 query。 |
+| 2026-06-08 | 1os3_Codex | AI 完成：记录检测 query 按完整类别 softmax argmax 显示最高概率类别。 |
+| 2026-06-08 | 1os3_Codex | AI 完成：同步可选 checkpoint 加载和轨迹 residual 反解口径。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：记录模型输出 BEV 默认显示完整 48 个 Agent 和 48 个 Map。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增模型输出 BEV 面板摘要说明。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增统一主干每层视觉特征 PCA 可视化摘要文档。 |

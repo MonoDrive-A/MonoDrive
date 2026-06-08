@@ -69,12 +69,15 @@ class ModelOutputVisualizationData:
     top_trajectory_points: np.ndarray
     agent_scores: np.ndarray
     agent_class_ids: np.ndarray
+    agent_class_labels: np.ndarray
     agent_boxes: np.ndarray
     agent_mode_ids: np.ndarray
     agent_future_points: np.ndarray
     map_scores: np.ndarray
     map_class_ids: np.ndarray
+    map_class_labels: np.ndarray
     map_points: np.ndarray
+    model_weight_source: str
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,7 @@ def run_backbone_feature_pca_sample(
     config_path: str | Path,
     project_root: str | Path,
     device: str | torch.device = "cpu",
+    checkpoint_path: str | Path | None = None,
     trajectory_top_k: int = DEFAULT_TRAJECTORY_TOP_K,
     agent_top_k: int = DEFAULT_DETECTION_TOP_K,
     map_top_k: int = DEFAULT_DETECTION_TOP_K,
@@ -134,6 +138,13 @@ def run_backbone_feature_pca_sample(
     if not resolved_h5_path.is_file():
         raise FileNotFoundError(f"h5_path 必须是文件：{resolved_h5_path}")
     resolved_config_path = _resolve_project_path(config_path, resolved_project_root, "config_path")
+    resolved_checkpoint_path = (
+        _resolve_project_path(checkpoint_path, resolved_project_root, "checkpoint_path")
+        if checkpoint_path is not None
+        else None
+    )
+    if resolved_checkpoint_path is not None and not resolved_checkpoint_path.is_file():
+        raise FileNotFoundError(f"checkpoint_path 必须是文件：{resolved_checkpoint_path}")
 
     backbone_config = load_backbone_config(resolved_config_path, resolved_project_root)
     fp32_backbone_config = override_backbone_precision(
@@ -167,6 +178,11 @@ def run_backbone_feature_pca_sample(
         fp32_backbone_config,
         vision_config=fp32_vision_config,
     ).to(device=target_device)
+    model_weight_source = _load_model_weights_if_requested(
+        model,
+        resolved_checkpoint_path,
+        target_device,
+    )
     model.eval()
 
     images = sample["images"].unsqueeze(0).to(device=target_device)
@@ -189,6 +205,7 @@ def run_backbone_feature_pca_sample(
         backbone_output,
         model,
         sample,
+        model_weight_source=model_weight_source,
         trajectory_top_k=trajectory_top_k,
         agent_top_k=agent_top_k,
         map_top_k=map_top_k,
@@ -229,6 +246,7 @@ def render_backbone_feature_pca_sample(
     output_path: str | Path,
     project_root: str | Path,
     device: str | torch.device = "cpu",
+    checkpoint_path: str | Path | None = None,
     trajectory_top_k: int = DEFAULT_TRAJECTORY_TOP_K,
     agent_top_k: int = DEFAULT_DETECTION_TOP_K,
     map_top_k: int = DEFAULT_DETECTION_TOP_K,
@@ -243,6 +261,7 @@ def render_backbone_feature_pca_sample(
         config_path=config_path,
         project_root=resolved_project_root,
         device=device,
+        checkpoint_path=checkpoint_path,
         trajectory_top_k=trajectory_top_k,
         agent_top_k=agent_top_k,
         map_top_k=map_top_k,
@@ -363,9 +382,10 @@ def _draw_model_outputs_panel(
     lines = [
         _format_top_trajectory_line(outputs),
         f"agents shown = {len(outputs.agent_scores)}, maps shown = {len(outputs.map_scores)}",
-        "trajectory = vocab_symlog + predicted residual, then inverse Symlog",
+        "detection queries whose argmax class is none are hidden",
+        "trajectory = vocab_symlog + residual * symlog_scale, then inverse Symlog",
         "agent/map coordinates are inverse Symlog or expm1 decoded for visualization only",
-        "model is untrained unless weights were loaded before running this viewer",
+        f"model weights = {outputs.model_weight_source}",
     ]
     for line_index, line in enumerate(lines):
         draw.text((x0 + 14, legend_y + 40 + line_index * 24), line, fill=(51, 65, 85), font=font)
@@ -447,7 +467,7 @@ def _draw_output_agents(
         label_point = transform.to_pixel(float(center_xy[0]), float(center_xy[1]))
         draw.text(
             (label_point[0] + 4, label_point[1] - 8),
-            f"{float(outputs.agent_scores[agent_index]):.2f}",
+            f"{str(outputs.agent_class_labels[agent_index])}:{float(outputs.agent_scores[agent_index]):.2f}",
             fill=color,
         )
 
@@ -494,6 +514,11 @@ def _draw_output_maps(
         ]
         if len(pixels) >= 2:
             draw.line(pixels, fill=color, width=1)
+            draw.text(
+                (pixels[0][0] + 4, pixels[0][1] - 8),
+                f"{str(outputs.map_class_labels[map_index])}:{float(outputs.map_scores[map_index]):.2f}",
+                fill=color,
+            )
 
 
 def _draw_output_target(
@@ -672,6 +697,7 @@ def _summarize_model_outputs(
     backbone_output: MonoDriveBackboneOutput,
     model: MonoDriveBackbone,
     sample: dict[str, Any],
+    model_weight_source: str,
     trajectory_top_k: int = DEFAULT_TRAJECTORY_TOP_K,
     agent_top_k: int = DEFAULT_DETECTION_TOP_K,
     map_top_k: int = DEFAULT_DETECTION_TOP_K,
@@ -683,11 +709,12 @@ def _summarize_model_outputs(
         model,
         trajectory_top_k,
     )
-    agent_scores, agent_class_ids, agent_boxes, agent_mode_ids, agent_future_points = _summarize_agent_outputs(
+    agent_scores, agent_class_ids, agent_class_labels, agent_boxes, agent_mode_ids, agent_future_points = _summarize_agent_outputs(
         backbone_output,
+        model,
         agent_top_k,
     )
-    map_scores, map_class_ids, map_points = _summarize_map_outputs(backbone_output, map_top_k)
+    map_scores, map_class_ids, map_class_labels, map_points = _summarize_map_outputs(backbone_output, model, map_top_k)
     return ModelOutputVisualizationData(
         target_point=_tensor_to_numpy(sample["target_point"]).astype(np.float32, copy=False),
         future_trajectory=_tensor_to_numpy(sample["future_trajectory"]).astype(np.float32, copy=False),
@@ -696,12 +723,15 @@ def _summarize_model_outputs(
         top_trajectory_points=trajectory_points,
         agent_scores=agent_scores,
         agent_class_ids=agent_class_ids,
+        agent_class_labels=agent_class_labels,
         agent_boxes=agent_boxes,
         agent_mode_ids=agent_mode_ids,
         agent_future_points=agent_future_points,
         map_scores=map_scores,
         map_class_ids=map_class_ids,
+        map_class_labels=map_class_labels,
         map_points=map_points,
+        model_weight_source=model_weight_source,
     )
 
 
@@ -716,7 +746,8 @@ def _summarize_trajectory_outputs(
     selected_count = min(top_k, int(probabilities.numel()))
     scores, indices = torch.topk(probabilities, k=selected_count)
     vocab_symlog = model.vocabulary.trajectory_vocab_symlog.detach().to(dtype=torch.float32).cpu()
-    selected_symlog = vocab_symlog[indices] + residuals[indices]
+    symlog_scale = model.vocabulary.symlog_scale.detach().to(dtype=torch.float32).cpu()
+    selected_symlog = vocab_symlog[indices] + residuals[indices] * symlog_scale
     trajectory_points = _inverse_symlog(selected_symlog)
     return (
         indices.numpy().astype(np.int32, copy=False),
@@ -727,8 +758,9 @@ def _summarize_trajectory_outputs(
 
 def _summarize_agent_outputs(
     backbone_output: MonoDriveBackboneOutput,
+    model: MonoDriveBackbone,
     top_k: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     detection_output = backbone_output.detection_output
     class_logits = detection_output.agent_class_logits[0].detach().to(dtype=torch.float32).cpu()
     states = detection_output.agent_states[0].detach().to(dtype=torch.float32).cpu()
@@ -736,11 +768,27 @@ def _summarize_agent_outputs(
     futures = detection_output.agent_future_trajectories[0].detach().to(dtype=torch.float32).cpu()
 
     class_probabilities = torch.softmax(class_logits, dim=-1)
-    foreground_probabilities = class_probabilities[:, :-1]
-    foreground_scores, class_ids = foreground_probabilities.max(dim=-1)
-    selected_count = min(top_k, int(foreground_scores.numel()))
-    selected_scores, selected_indices = torch.topk(foreground_scores, k=selected_count)
+    query_scores, class_ids = class_probabilities.max(dim=-1)
+    none_class_id = len(model.detection_config.agent_class_names)
+    non_none_indices = torch.nonzero(class_ids != none_class_id, as_tuple=False).flatten()
+    if int(non_none_indices.numel()) == 0:
+        return (
+            np.empty((0,), dtype=np.float32),
+            np.empty((0,), dtype=np.int32),
+            np.empty((0,), dtype=object),
+            np.empty((0, 6), dtype=np.float32),
+            np.empty((0,), dtype=np.int32),
+            np.empty((0, model.detection_config.agent_future_points, 2), dtype=np.float32),
+        )
+    candidate_scores = query_scores[non_none_indices]
+    selected_count = min(top_k, int(candidate_scores.numel()))
+    selected_scores, candidate_order = torch.topk(candidate_scores, k=selected_count)
+    selected_indices = non_none_indices[candidate_order]
     selected_class_ids = class_ids[selected_indices]
+    class_labels = _select_class_labels(
+        (*model.detection_config.agent_class_names, model.detection_config.agent_none_class_name),
+        selected_class_ids,
+    )
 
     selected_states = states[selected_indices]
     centers_xy = _inverse_symlog(selected_states[:, 0:2])
@@ -756,6 +804,7 @@ def _summarize_agent_outputs(
     return (
         selected_scores.numpy().astype(np.float32, copy=False),
         selected_class_ids.numpy().astype(np.int32, copy=False),
+        class_labels,
         agent_boxes.numpy().astype(np.float32, copy=False),
         mode_ids.numpy().astype(np.int32, copy=False),
         future_points.numpy().astype(np.float32, copy=False),
@@ -764,22 +813,44 @@ def _summarize_agent_outputs(
 
 def _summarize_map_outputs(
     backbone_output: MonoDriveBackboneOutput,
+    model: MonoDriveBackbone,
     top_k: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     detection_output = backbone_output.detection_output
     class_logits = detection_output.map_class_logits[0].detach().to(dtype=torch.float32).cpu()
     points = detection_output.map_points[0].detach().to(dtype=torch.float32).cpu()
     class_probabilities = torch.softmax(class_logits, dim=-1)
-    foreground_probabilities = class_probabilities[:, :-1]
-    foreground_scores, class_ids = foreground_probabilities.max(dim=-1)
-    selected_count = min(top_k, int(foreground_scores.numel()))
-    selected_scores, selected_indices = torch.topk(foreground_scores, k=selected_count)
+    query_scores, class_ids = class_probabilities.max(dim=-1)
+    none_class_id = len(model.detection_config.map_class_names)
+    non_none_indices = torch.nonzero(class_ids != none_class_id, as_tuple=False).flatten()
+    if int(non_none_indices.numel()) == 0:
+        return (
+            np.empty((0,), dtype=np.float32),
+            np.empty((0,), dtype=np.int32),
+            np.empty((0,), dtype=object),
+            np.empty((0, model.detection_config.map_point_count, 2), dtype=np.float32),
+        )
+    candidate_scores = query_scores[non_none_indices]
+    selected_count = min(top_k, int(candidate_scores.numel()))
+    selected_scores, candidate_order = torch.topk(candidate_scores, k=selected_count)
+    selected_indices = non_none_indices[candidate_order]
+    selected_class_ids = class_ids[selected_indices]
+    class_labels = _select_class_labels(
+        (*model.detection_config.map_class_names, model.detection_config.map_none_class_name),
+        selected_class_ids,
+    )
     selected_points = _inverse_symlog(points[selected_indices])
     return (
         selected_scores.numpy().astype(np.float32, copy=False),
-        class_ids[selected_indices].numpy().astype(np.int32, copy=False),
+        selected_class_ids.numpy().astype(np.int32, copy=False),
+        class_labels,
         selected_points.numpy().astype(np.float32, copy=False),
     )
+
+
+def _select_class_labels(class_names: tuple[str, ...], class_ids: torch.Tensor) -> np.ndarray:
+    labels = [class_names[int(class_id)] for class_id in class_ids]
+    return np.asarray(labels, dtype=object)
 
 
 def _inverse_symlog(values: torch.Tensor) -> torch.Tensor:
@@ -891,6 +962,57 @@ def _tensor_to_numpy(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
+def _load_model_weights_if_requested(
+    model: MonoDriveBackbone,
+    checkpoint_path: Path | None,
+    device: torch.device,
+) -> str:
+    if checkpoint_path is None:
+        return "initialized"
+    try:
+        payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        payload = torch.load(checkpoint_path, map_location=device)
+    state_dict = _extract_model_state_dict(payload, checkpoint_path)
+    model.load_state_dict(state_dict, strict=True)
+    checkpoint_label = _format_display_path(checkpoint_path)
+    step = payload.get("global_step") if isinstance(payload, dict) else None
+    if step is None:
+        return checkpoint_label
+    return f"{checkpoint_label} @ step {int(step)}"
+
+
+def _extract_model_state_dict(payload: Any, checkpoint_path: Path) -> dict[str, torch.Tensor]:
+    if not isinstance(payload, dict):
+        raise TypeError(f"checkpoint payload 必须是 dict：{checkpoint_path}")
+    candidate: Any
+    if "model_state" in payload:
+        candidate = payload["model_state"]
+    elif "state_dict" in payload:
+        candidate = payload["state_dict"]
+    elif "model" in payload:
+        candidate = payload["model"]
+    else:
+        candidate = payload
+    if not isinstance(candidate, dict) or not candidate:
+        raise TypeError(f"checkpoint 未包含可加载的模型 state_dict：{checkpoint_path}")
+    if not all(isinstance(key, str) for key in candidate):
+        raise TypeError(f"checkpoint state_dict key 必须全部为字符串：{checkpoint_path}")
+    if not all(isinstance(value, torch.Tensor) for value in candidate.values()):
+        raise TypeError(f"checkpoint state_dict value 必须全部为 torch.Tensor：{checkpoint_path}")
+    state_dict = dict(candidate)
+    if all(key.startswith("module.") for key in state_dict):
+        state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
+    return state_dict
+
+
+def _format_display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _draw_panel_label(
     draw: ImageDraw.ImageDraw,
     origin: tuple[int, int],
@@ -938,6 +1060,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, default=None, help="输出 PNG 路径，必须位于项目目录内。")
     parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="可选模型 checkpoint，支持训练 payload 的 model_state 或直接保存的 state_dict。",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("visualization/outputs/backbone_feature_pca"),
@@ -973,6 +1101,7 @@ def main(argv: list[str] | None = None) -> int:
         output_path=output_path,
         project_root=project_root,
         device=args.device,
+        checkpoint_path=args.checkpoint,
         trajectory_top_k=args.trajectory_top_k,
         agent_top_k=args.agent_top_k,
         map_top_k=args.map_top_k,
