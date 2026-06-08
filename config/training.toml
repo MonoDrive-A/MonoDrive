@@ -37,7 +37,7 @@ max_grad_norm = 1.0
 zero_grad_set_to_none = true
 
 [loss_weights]
-trajectory_logit_bce = 1.0
+trajectory_logit_soft_ce = 1.0
 trajectory_residual_mse = 1.0
 agent_class_ce = 1.0
 agent_state_mse = 1.0

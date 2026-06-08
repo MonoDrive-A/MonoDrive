@@ -29,10 +29,11 @@
 
 - 不在本文件重复已有模型结构默认值。
 - 修改训练配置字段时，同步 `train/training_config.py` 和本文档。
-- 轨迹词表概率 loss 使用 BCEWithLogits，不使用 softmax 或 CE。
+- 轨迹词表概率 loss 使用 soft cross entropy，标签为和为 1 的 inverse-MSE soft label。
 
 ## 7. 维护记录
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：同步轨迹词表 soft CE loss 口径。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：新增训练主配置摘要。 |

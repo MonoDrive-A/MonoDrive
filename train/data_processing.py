@@ -80,7 +80,6 @@ class TrainingDataConfig:
     map_position_abs_max_m: float
     inverse_mse_eps: float
     inverse_mse_max_logit: float
-    label_normalize_max: bool
     agent_class_cost_weight: float
     agent_center_cost_weight: float
     agent_size_cost_weight: float
@@ -308,7 +307,6 @@ def load_training_data_config(
         map_position_abs_max_m=_require_float(validation_config, "map_position_abs_max_m"),
         inverse_mse_eps=_require_float(trajectory_label_config, "inverse_mse_eps"),
         inverse_mse_max_logit=_require_float(trajectory_label_config, "inverse_mse_max_logit"),
-        label_normalize_max=_require_bool(trajectory_label_config, "label_normalize_max"),
         agent_class_cost_weight=_require_float(agent_matching_config, "class_cost_weight"),
         agent_center_cost_weight=_require_float(agent_matching_config, "center_cost_weight"),
         agent_size_cost_weight=_require_float(agent_matching_config, "size_cost_weight"),
@@ -408,6 +406,9 @@ def build_trajectory_vocab_labels(
     gt_trajectory_m = future_trajectory_m.to(device=logits.device, dtype=torch.float32)
     vocab_m = vocabulary.trajectory_vocab_m.to(device=logits.device, dtype=torch.float32)
     vocab_symlog = vocabulary.trajectory_vocab_symlog.to(device=logits.device, dtype=torch.float32)
+    symlog_scale = vocabulary.symlog_scale.to(device=logits.device, dtype=torch.float32).clamp_min(
+        config.inverse_mse_eps
+    )
 
     _validate_shape(logits, 2, "trajectory_output.logits")
     _validate_shape(residuals, 4, "trajectory_output.residuals")
@@ -423,7 +424,7 @@ def build_trajectory_vocab_labels(
             f"实际为 {tuple(gt_trajectory_m.shape)}。"
         )
 
-    predicted_trajectories_m = inverse_symlog(vocab_symlog.unsqueeze(0) + residuals)
+    predicted_trajectories_m = inverse_symlog(vocab_symlog.unsqueeze(0) + residuals * symlog_scale)
     mse = (vocab_m.unsqueeze(0) - gt_trajectory_m[:, None, :, :]).square().mean(dim=(2, 3))
     inverse_mse = 1.0 / (mse + config.inverse_mse_eps)
     normalized_logits = config.inverse_mse_max_logit * inverse_mse / inverse_mse.max(
@@ -431,15 +432,13 @@ def build_trajectory_vocab_labels(
         keepdim=True,
     ).values.clamp_min(config.inverse_mse_eps)
     soft_labels = torch.softmax(normalized_logits, dim=1)
-    if config.label_normalize_max:
-        soft_labels = soft_labels / soft_labels.max(dim=1, keepdim=True).values.clamp_min(
-            config.inverse_mse_eps
-        )
     winner_indices = torch.argmin(mse, dim=1)
     gt_symlog = symlog(gt_trajectory_m)
     residual_targets = torch.zeros_like(residuals)
     batch_indices = torch.arange(logits.shape[0], device=logits.device)
-    residual_targets[batch_indices, winner_indices] = gt_symlog - vocab_symlog[winner_indices]
+    residual_targets[batch_indices, winner_indices] = (
+        gt_symlog - vocab_symlog[winner_indices]
+    ) / symlog_scale
     residual_mask = torch.zeros_like(logits, dtype=torch.bool)
     residual_mask[batch_indices, winner_indices] = True
     return TrajectoryVocabLabels(

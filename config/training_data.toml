@@ -22,7 +22,6 @@ map_position_abs_max_m = 200.0
 [trajectory_label]
 inverse_mse_eps = 1e-6
 inverse_mse_max_logit = 10.0
-label_normalize_max = true
 
 [agent_matching]
 class_cost_weight = 1.0

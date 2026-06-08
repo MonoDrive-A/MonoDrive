@@ -127,7 +127,7 @@ class OptimizationConfig:
 class LossWeights:
     """训练 loss 权重。"""
 
-    trajectory_logit_bce: float
+    trajectory_logit_soft_ce: float
     trajectory_residual_mse: float
     agent_class_ce: float
     agent_state_mse: float
@@ -316,7 +316,10 @@ def load_training_run_config(
             ),
         ),
         loss_weights=LossWeights(
-            trajectory_logit_bce=_require_float(loss_weights_config, "trajectory_logit_bce"),
+            trajectory_logit_soft_ce=_require_float(
+                loss_weights_config,
+                "trajectory_logit_soft_ce",
+            ),
             trajectory_residual_mse=_require_float(
                 loss_weights_config,
                 "trajectory_residual_mse",

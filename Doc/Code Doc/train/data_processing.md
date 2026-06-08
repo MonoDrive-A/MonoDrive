@@ -64,7 +64,7 @@
 | `future_trajectory` | `[B, 6, 2]` | ego 坐标系未来规划 GT，单位 meter。 |
 | `trajectory_output.logits` | `[B, V]` | 轨迹词表未激活 logit。 |
 | `trajectory_output.residuals` | `[B, V, 6, 2]` | Symlog 空间残差。 |
-| `trajectory_soft_labels` | `[B, V]` | 由物理空间 MSE 构造的 soft label。 |
+| `trajectory_soft_labels` | `[B, V]` | 由物理空间 MSE 构造、和为 1 的 soft label。 |
 | `agent_class_logits` | `[B, 48, C_agent + 1]` | Agent 分类预测。 |
 | `agent_states` | `[B, 48, 11]` | Agent 监督空间状态预测。 |
 | `agent_future_trajectories` | `[B, 48, 4, 6, 2]` | Agent future Symlog 空间预测。 |
@@ -75,7 +75,7 @@
 
 训练 Dataset 先调用 `B2DH5Dataset` 读取样本，再对图像、ego future、ego motion、目标点、Agent 和 Map 字段执行 finite 与范围校验。初始化扫描开启时，无效样本会从 `ValidatedTrainingDataset` 的索引中剔除，不写回 H5。读取阶段若仍遇到无效样本，则跳过该样本并返回后续有效样本；若整个索引集合都无效，异常信息会包含首个失败样本的具体校验原因。
 
-轨迹词表标签构造中，词表物理轨迹与 GT 轨迹在 ego meter 空间计算 MSE。MSE 取倒数、归一化到最大 logit 后 softmax，最后可把最大概率归一化为 1。winner 取物理空间 MSE 最小的词表项，残差目标为 `symlog(GT) - vocab_symlog[winner]`。
+轨迹词表标签构造中，词表物理轨迹与 GT 轨迹在 ego meter 空间计算 MSE。MSE 取倒数、归一化到最大 logit 后 softmax，得到和为 1 的 soft label。winner 取物理空间 MSE 最小的词表项，残差目标为 `(symlog(GT) - vocab_symlog[winner]) / symlog_scale`。模型 residual 反解到物理空间时使用 `inverse_symlog(vocab_symlog + residual * symlog_scale)`。
 
 Agent 匹配中，模型输出先恢复为 FP32 物理空间：位置、速度、加速度和 future 使用反 Symlog；尺寸使用 `expm1`；yaw 使用 sin/cos 向量 cost。匹配完成后，监督目标再写回模型训练空间。Agent future mask 保留 H5 中 `[K]` 逐点有效性，只在匹配 query 的 winner mode 写入 `[K]` mask，避免 padding 未来点进入 loss。
 
@@ -107,6 +107,7 @@ Map 匹配中，预测点反 Symlog 到 ego meter 空间计算点误差。`lane_
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：轨迹 residual 目标改为除以 `symlog_scale` 的归一化空间，反解时乘回 `symlog_scale`。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增训练数据处理模块，支持 H5 样本过滤、轨迹词表标签、Agent/Map Hungarian matching，并移除危险轨迹判断。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：将 Agent future mask 改为 winner mode 逐点 mask，并让 Map 无方向类别监督沿用匹配时误差更小的点序。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：放开 H5 只读数据源路径限制，允许 `h5_dir` 和 `h5_paths` 使用项目外绝对路径。 |

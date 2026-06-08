@@ -50,7 +50,7 @@ class MonoDriveTrainingLoss(nn.Module):
         """计算单个 batch 的总 loss。"""
 
         raw_components = {
-            "trajectory_logit_bce": self._trajectory_logit_bce(model_output, labels),
+            "trajectory_logit_soft_ce": self._trajectory_logit_soft_ce(model_output, labels),
             "trajectory_residual_mse": self._trajectory_residual_mse(model_output, labels),
             "agent_class_ce": self._agent_class_ce(model_output, labels),
             "agent_state_mse": self._agent_state_mse(model_output, labels),
@@ -67,15 +67,22 @@ class MonoDriveTrainingLoss(nn.Module):
         components = {**raw_components, **weighted_components, "total_loss": total_loss}
         return TrainingLossOutput(total_loss=total_loss, components=components)
 
-    def _trajectory_logit_bce(
+    def _trajectory_logit_soft_ce(
         self,
         model_output: MonoDriveBackboneOutput,
         labels: TrainingBatchLabels,
     ) -> torch.Tensor:
         logits = model_output.trajectory_output.logits.to(dtype=torch.float32)
-        soft_targets = labels.trajectory.soft_labels.to(device=logits.device, dtype=torch.float32)
-        soft_targets = soft_targets.clamp(min=0.0, max=1.0)
-        return F.binary_cross_entropy_with_logits(logits, soft_targets, reduction="mean")
+        target_probabilities = labels.trajectory.soft_labels.to(
+            device=logits.device,
+            dtype=torch.float32,
+        ).clamp_min(0.0)
+        target_probabilities = target_probabilities / target_probabilities.sum(
+            dim=1,
+            keepdim=True,
+        ).clamp_min(1e-12)
+        log_probabilities = F.log_softmax(logits, dim=1)
+        return -(target_probabilities * log_probabilities).sum(dim=1).mean()
 
     def _trajectory_residual_mse(
         self,

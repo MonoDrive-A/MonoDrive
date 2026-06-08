@@ -38,7 +38,7 @@
 
 优化器配置使用 AdamW。学习率调度由 `initial_lr` 开始，经 `warmup_steps` 线性升至 `peak_lr`，中间保持峰值学习率，最后 `cosine_decay_steps` 使用余弦退火降至 `min_lr`。
 
-轨迹词表概率监督使用 `trajectory_logit_bce` 权重，对模型 raw logits 使用 `BCEWithLogits`。该项不使用 softmax，因为标签由 `train/data_processing.py` 构造为最大值为 1 的软分数，而不是和为 1 的概率分布。
+轨迹词表概率监督使用 `trajectory_logit_soft_ce` 权重，对模型 raw logits 使用 soft cross entropy。标签由 `train/data_processing.py` 在物理空间按 inverse-MSE 构造，并保持为和为 1 的概率分布。
 
 ## 6. 配置项
 
@@ -68,10 +68,11 @@
 
 - 输出目录必须位于项目目录内，且不应提交 checkpoint、日志或训练中间产物。
 - 本文件不重复配置 DINOv3、3D Conv、Transformer、检测头或轨迹词表的结构默认值。
-- `CrossEntropyLoss` 只用于 Agent / Map 分类和 Agent mode；轨迹词表分数不使用 CE。
+- 轨迹词表分数使用 soft CE；Agent / Map 分类和 Agent mode 使用 hard-label CE。
 
 ## 9. 维护记录
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：轨迹词表概率 loss 从 BCE 改为 soft CE，并同步 loss 权重字段名。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：新增训练主流程配置。 |

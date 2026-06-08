@@ -51,7 +51,6 @@
 | `validation.*` | 见配置文件 | 样本数值范围阈值。 |
 | `trajectory_label.inverse_mse_eps` | `1e-6` | 轨迹 MSE 取倒数时的稳定项。 |
 | `trajectory_label.inverse_mse_max_logit` | `10.0` | 倒数 MSE 归一化后的最大 logit。 |
-| `trajectory_label.label_normalize_max` | `true` | softmax 后是否把最大标签归一化为 1。 |
 | `agent_matching.*_cost_weight` | 见配置文件 | Agent 匹配 cost 权重。 |
 | `map_matching.*_cost_weight` | 见配置文件 | Map 匹配 cost 权重。 |
 | `map_matching.bidirectional_class_names` | `["lane_divider", "road_edge"]` | 点序正反等价的 Map 类别。 |
@@ -74,5 +73,6 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：移除轨迹 soft label 最大值归一化配置，保持 soft label 为和为 1 的概率分布。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增训练数据处理配置，覆盖 H5 读取、样本校验、轨迹标签和 Agent / Map Hungarian 权重，并明确不启用危险轨迹判断。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：放开 H5 只读数据源路径说明，允许项目外绝对路径。 |

@@ -15,13 +15,13 @@
 
 | 名称 | Shape | 说明 |
 | --- | --- | --- |
-| 轨迹 logits | `[B, V]` | 使用 BCEWithLogits。 |
+| 轨迹 logits | `[B, V]` | 使用 soft cross entropy。 |
 | Agent future mask | `[B, 48, 4, 6]` | 逐 mode / 逐点有效 mask。 |
 | Map 点 | `[B, 48, 100, 2]` | 匹配 query 的 Symlog 空间监督。 |
 
 ## 4. 使用规范
 
-传入 `MonoDriveBackboneOutput` 和 `TrainingBatchLabels`。轨迹词表分数不使用 Softmax；分类和 mode CE 传入 raw logits，mode 只监督存在有效 future 点的匹配 query。
+传入 `MonoDriveBackboneOutput` 和 `TrainingBatchLabels`。轨迹词表分数在 loss 内部使用 `log_softmax` 计算 soft CE；分类和 mode CE 传入 raw logits，mode 只监督存在有效 future 点的匹配 query。
 
 ## 5. 最小示例
 
@@ -35,4 +35,5 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：同步轨迹词表 soft CE loss 摘要。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：新增训练 loss 摘要。 |
