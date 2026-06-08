@@ -13,6 +13,7 @@
 | `DataLoaderConfig` | dataclass | DataLoader 配置。 |
 | `OptimizationConfig` | dataclass | AdamW 和学习率调度配置。 |
 | `LossWeights` | dataclass | 各项 loss 权重。 |
+| `DetectionClassWeightConfig` | dataclass | 检测分类 CE 的 none / non-none 类别权重配置。 |
 | `GradientMonitorConfig` | dataclass | 梯度监测配置。 |
 | `CheckpointConfig` | dataclass | checkpoint 配置。 |
 | `LoggingConfig` | dataclass | 日志配置。 |
@@ -38,6 +39,13 @@
 - 功能：保存 loss 权重。
 - 关键约束：权重不能为负，且不能全部为 0。
 
+### `DetectionClassWeightConfig`
+
+- 功能：保存 Agent / Map 分类 CE 的 none / non-none 组权重策略。
+- 输入：`mode`、手动权重和自动权重上下限。
+- 输出：不可变 dataclass，供 `train/losses.py` 构造分类 CE 权重。
+- 关键约束：`mode` 仅支持 `auto`、`manual`、`disabled`；手动权重不能为负；同一检测分支的 none 与 non-none 权重不能同时为 0；自动权重上下限必须为正数且下限不大于上限。
+
 ## 4. 输入输出与 Shape
 
 | 名称 | Shape | 说明 |
@@ -54,6 +62,11 @@
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `config/training.toml` | 见配置文件 | 本文件读取的主配置。 |
+| `detection_class_weights.mode` | `auto` | 检测分类 CE 的 none / non-none 权重模式。 |
+| `detection_class_weights.*_non_none_weight` | 见配置文件 | 手动模式下 Agent / Map 前景类别组权重。 |
+| `detection_class_weights.*_none_weight` | 见配置文件 | 手动模式下 Agent / Map none 类权重。 |
+| `detection_class_weights.auto_min_weight` | 见配置文件 | 自动模式下 batch 动态权重下限。 |
+| `detection_class_weights.auto_max_weight` | 见配置文件 | 自动模式下 batch 动态权重上限。 |
 
 ## 7. 依赖关系
 
@@ -65,9 +78,11 @@
 
 - 不要在实现文件中写入配置文件已有默认值。
 - 新增训练配置字段时必须同步 dataclass、读取函数、配置文档和摘要文档。
+- `DetectionClassWeightConfig` 只描述权重策略，具体 batch 级自动权重计算在 `train/losses.py` 中完成。
 
 ## 9. 维护记录
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：新增检测分类 none / non-none 类别权重配置解析。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：新增训练主配置解析模块。 |

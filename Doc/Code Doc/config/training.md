@@ -2,7 +2,7 @@
 
 ## 1. 文件职责
 
-`config/training.toml` 集中保存训练主流程配置，包括模型与数据配置引用、运行设备、随机种子、DataLoader、AdamW 优化器、学习率调度、loss 权重、梯度监测、checkpoint 和日志输出。
+`config/training.toml` 集中保存训练主流程配置，包括模型与数据配置引用、运行设备、随机种子、DataLoader、AdamW 优化器、学习率调度、loss 权重、检测分类 none / non-none 类别权重、梯度监测、checkpoint 和日志输出。
 
 本文件不保存模型结构默认值。主干、视觉嵌入、检测头、轨迹词表、目标点嵌入和训练数据处理的结构性配置继续由各自 TOML 文件维护。
 
@@ -16,6 +16,7 @@
 | `[dataloader]` | TOML table | Batch、shuffle 和 worker 配置。 |
 | `[optimization]` | TOML table | AdamW、warmup、余弦退火和梯度裁剪配置。 |
 | `[loss_weights]` | TOML table | 各项 loss 权重。 |
+| `[detection_class_weights]` | TOML table | Agent / Map 分类 CE 的 none / non-none 权重策略。 |
 | `[gradient_monitor]` | TOML table | 梯度过大、过小和非有限值监测阈值。 |
 | `[checkpoint]` | TOML table | 自动保存和断点恢复配置。 |
 | `[logging]` | TOML table | 训练指标日志配置。 |
@@ -40,6 +41,8 @@
 
 轨迹词表概率监督使用 `trajectory_logit_soft_ce` 权重，对模型 raw logits 使用 soft cross entropy。标签由 `train/data_processing.py` 在物理空间按 inverse-MSE 构造，并保持为和为 1 的概率分布。
 
+Agent / Map 分类 CE 可通过 `[detection_class_weights]` 控制 none 与 non-none 组的相对权重。默认 `mode = "auto"` 时，`train/losses.py` 按当前 batch 分类目标数量动态平衡两组权重；`mode = "manual"` 时使用配置中的手动权重；`mode = "disabled"` 时保持未加类别权重的 CE。
+
 ## 6. 配置项
 
 | 配置项 | 默认值 | 说明 |
@@ -55,6 +58,13 @@
 | `optimization.warmup_steps` | `5000` | 线性 warmup step 数。 |
 | `optimization.cosine_decay_steps` | `5000` | 末尾余弦退火 step 数。 |
 | `loss_weights.*` | `1.0` | 各项 loss 权重。 |
+| `detection_class_weights.mode` | `auto` | 检测分类类别权重模式，支持 `auto`、`manual`、`disabled`。 |
+| `detection_class_weights.agent_non_none_weight` | `1.0` | 手动模式下 Agent 非 none 类别组权重。 |
+| `detection_class_weights.agent_none_weight` | `1.0` | 手动模式下 Agent none 类别权重。 |
+| `detection_class_weights.map_non_none_weight` | `1.0` | 手动模式下 Map 非 none 类别组权重。 |
+| `detection_class_weights.map_none_weight` | `1.0` | 手动模式下 Map none 类别权重。 |
+| `detection_class_weights.auto_min_weight` | `0.1` | 自动模式下动态类别权重下限。 |
+| `detection_class_weights.auto_max_weight` | `10.0` | 自动模式下动态类别权重上限。 |
 | `gradient_monitor.*` | 见配置文件 | 梯度范数监测阈值和报告数量。 |
 | `checkpoint.output_dir` | `checkpoints/training` | checkpoint 保存目录。 |
 | `logging.output_dir` | `logs/training` | 指标日志目录。 |
@@ -69,10 +79,12 @@
 - 输出目录必须位于项目目录内，且不应提交 checkpoint、日志或训练中间产物。
 - 本文件不重复配置 DINOv3、3D Conv、Transformer、检测头或轨迹词表的结构默认值。
 - 轨迹词表分数使用 soft CE；Agent / Map 分类和 Agent mode 使用 hard-label CE。
+- 检测分类自动类别权重是 batch 级动态口径，不会读取或写入额外统计文件。
 
 ## 9. 维护记录
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：新增检测分类 none / non-none 类别权重配置，默认自动调整。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：轨迹词表概率 loss 从 BCE 改为 soft CE，并同步 loss 权重字段名。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：新增训练主流程配置。 |

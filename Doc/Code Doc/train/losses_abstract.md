@@ -2,7 +2,7 @@
 
 ## 1. 文件基本功能
 
-`train/losses.py` 汇总规划、Agent 和 Map 训练 loss，并输出加权总 loss。
+`train/losses.py` 汇总规划、Agent 和 Map 训练 loss，并输出加权总 loss。Agent / Map 分类 CE 支持 none 与 non-none 组类别权重，默认自动按 batch 目标分布调整。
 
 ## 2. 主要公开接口
 
@@ -21,19 +21,20 @@
 
 ## 4. 使用规范
 
-传入 `MonoDriveBackboneOutput` 和 `TrainingBatchLabels`。轨迹词表分数在 loss 内部使用 `log_softmax` 计算 soft CE；分类和 mode CE 传入 raw logits，mode 只监督存在有效 future 点的匹配 query。
+传入 `MonoDriveBackboneOutput` 和 `TrainingBatchLabels`。轨迹词表分数在 loss 内部使用 `log_softmax` 计算 soft CE；Agent / Map 分类 CE 传入 raw logits，并按 `detection_class_weights.mode` 选择 `auto`、`manual` 或 `disabled`；mode CE 只监督存在有效 future 点的匹配 query。
 
 ## 5. 最小示例
 
-适合训练入口构造 `MonoDriveTrainingLoss(config.loss_weights)` 后在每步调用。
+适合训练入口构造 `MonoDriveTrainingLoss(config.loss_weights, config.detection_class_weights)` 后在每步调用。
 
 ## 6. 维护注意事项
 
-修改 loss 权重字段、mask shape 或监督空间时，同步训练配置和文档。
+修改 loss 权重字段、检测分类权重模式、mask shape 或监督空间时，同步训练配置和文档。
 
 ## 7. 维护记录
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：同步检测分类 none / non-none 类别权重摘要。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：同步轨迹词表 soft CE loss 摘要。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：新增训练 loss 摘要。 |

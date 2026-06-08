@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from model.backbone import MonoDriveBackboneOutput
 from train.data_processing import TrainingBatchLabels
-from train.training_config import LossWeights
+from train.training_config import DetectionClassWeightConfig, LossWeights
 
 
 __all__ = [
@@ -31,6 +31,7 @@ class MonoDriveTrainingLoss(nn.Module):
 
     Args:
         weights: `config/training.toml` 中读取的 loss 权重。
+        detection_class_weights: 检测分类 none / non-none 类别权重配置。
 
     Shape:
         输入模型输出沿用 `MonoDriveBackboneOutput`。
@@ -38,9 +39,14 @@ class MonoDriveTrainingLoss(nn.Module):
         输出 `total_loss` 为标量 FP32 张量。
     """
 
-    def __init__(self, weights: LossWeights) -> None:
+    def __init__(
+        self,
+        weights: LossWeights,
+        detection_class_weights: DetectionClassWeightConfig,
+    ) -> None:
         super().__init__()
         self.weights = weights
+        self.detection_class_weights = detection_class_weights
 
     def forward(
         self,
@@ -101,7 +107,15 @@ class MonoDriveTrainingLoss(nn.Module):
     ) -> torch.Tensor:
         logits = model_output.detection_output.agent_class_logits.to(dtype=torch.float32)
         targets = labels.agent.class_targets.to(device=logits.device, dtype=torch.long)
-        return F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
+        return _detection_class_cross_entropy(
+            logits=logits,
+            targets=targets,
+            none_index=int(logits.shape[-1]) - 1,
+            weight_config=self.detection_class_weights,
+            non_none_weight=self.detection_class_weights.agent_non_none_weight,
+            none_weight=self.detection_class_weights.agent_none_weight,
+            name="agent_class_ce",
+        )
 
     def _agent_state_mse(
         self,
@@ -140,7 +154,15 @@ class MonoDriveTrainingLoss(nn.Module):
     ) -> torch.Tensor:
         logits = model_output.detection_output.map_class_logits.to(dtype=torch.float32)
         targets = labels.map.class_targets.to(device=logits.device, dtype=torch.long)
-        return F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
+        return _detection_class_cross_entropy(
+            logits=logits,
+            targets=targets,
+            none_index=int(logits.shape[-1]) - 1,
+            weight_config=self.detection_class_weights,
+            non_none_weight=self.detection_class_weights.map_non_none_weight,
+            none_weight=self.detection_class_weights.map_none_weight,
+            name="map_class_ce",
+        )
 
     def _map_point_mse(
         self,
@@ -176,6 +198,138 @@ def _masked_mse(
     squared_error = (predictions - targets).square() * expanded_mask
     denominator = expanded_mask.expand_as(predictions).sum().clamp_min(1.0)
     return squared_error.sum() / denominator
+
+
+def _detection_class_cross_entropy(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    none_index: int,
+    weight_config: DetectionClassWeightConfig,
+    non_none_weight: float,
+    none_weight: float,
+    name: str,
+) -> torch.Tensor:
+    if logits.ndim < 2:
+        raise ValueError(f"{name} logits 至少需要 2 维，实际 shape 为 {tuple(logits.shape)}。")
+    class_count = int(logits.shape[-1])
+    if logits.shape[:-1] != targets.shape:
+        raise ValueError(
+            f"{name} logits 前置 shape 必须与 targets 一致，"
+            f"实际为 {tuple(logits.shape)} 和 {tuple(targets.shape)}。"
+        )
+    if class_count <= 1:
+        raise ValueError(f"{name} 至少需要 2 个分类通道，实际为 {class_count}。")
+    if none_index < 0 or none_index >= class_count:
+        raise ValueError(
+            f"{name} none_index 必须位于 [0, {class_count})，实际为 {none_index}。"
+        )
+
+    flat_logits = logits.reshape(-1, class_count)
+    flat_targets = targets.reshape(-1)
+    if flat_targets.numel() == 0:
+        return flat_logits.sum() * 0.0
+    target_min = int(flat_targets.amin().item())
+    target_max = int(flat_targets.amax().item())
+    if target_min < 0 or target_max >= class_count:
+        raise ValueError(
+            f"{name} targets 必须位于 [0, {class_count})，"
+            f"实际最小/最大为 {target_min}/{target_max}。"
+        )
+
+    class_weight = _build_detection_class_weight(
+        targets=flat_targets,
+        class_count=class_count,
+        none_index=none_index,
+        weight_config=weight_config,
+        non_none_weight=non_none_weight,
+        none_weight=none_weight,
+    )
+    return _weighted_cross_entropy(flat_logits, flat_targets, class_weight)
+
+
+def _build_detection_class_weight(
+    targets: torch.Tensor,
+    class_count: int,
+    none_index: int,
+    weight_config: DetectionClassWeightConfig,
+    non_none_weight: float,
+    none_weight: float,
+) -> torch.Tensor | None:
+    if weight_config.mode == "disabled":
+        return None
+    if weight_config.mode == "manual":
+        return _constant_detection_class_weight(
+            class_count=class_count,
+            none_index=none_index,
+            non_none_weight=non_none_weight,
+            none_weight=none_weight,
+            device=targets.device,
+        )
+    return _auto_detection_class_weight(
+        targets=targets,
+        class_count=class_count,
+        none_index=none_index,
+        weight_config=weight_config,
+    )
+
+
+def _constant_detection_class_weight(
+    class_count: int,
+    none_index: int,
+    non_none_weight: float,
+    none_weight: float,
+    device: torch.device,
+) -> torch.Tensor:
+    class_weight = torch.full(
+        (class_count,),
+        float(non_none_weight),
+        device=device,
+        dtype=torch.float32,
+    )
+    class_weight[none_index] = float(none_weight)
+    return class_weight
+
+
+def _auto_detection_class_weight(
+    targets: torch.Tensor,
+    class_count: int,
+    none_index: int,
+    weight_config: DetectionClassWeightConfig,
+) -> torch.Tensor | None:
+    none_count = int((targets == none_index).sum().item())
+    non_none_count = int(targets.numel()) - none_count
+    if none_count == 0 or non_none_count == 0:
+        return None
+
+    total_count = float(none_count + non_none_count)
+    non_none_weight = total_count / (2.0 * float(non_none_count))
+    none_weight = total_count / (2.0 * float(none_count))
+    class_weight = _constant_detection_class_weight(
+        class_count=class_count,
+        none_index=none_index,
+        non_none_weight=non_none_weight,
+        none_weight=none_weight,
+        device=targets.device,
+    )
+    return class_weight.clamp(
+        min=weight_config.auto_min_weight,
+        max=weight_config.auto_max_weight,
+    )
+
+
+def _weighted_cross_entropy(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    class_weight: torch.Tensor | None,
+) -> torch.Tensor:
+    losses = F.cross_entropy(logits, targets, reduction="none")
+    if class_weight is None:
+        return losses.mean()
+    sample_weights = class_weight[targets]
+    denominator = sample_weights.sum()
+    if not bool((denominator > 0.0).item()):
+        return logits.sum() * 0.0
+    return (losses * sample_weights).sum() / denominator.clamp_min(1e-12)
 
 
 def _masked_cross_entropy(

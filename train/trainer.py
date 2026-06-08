@@ -141,7 +141,10 @@ def run_training(
     _ensure_dinov3_frozen(model)
     optimizer = _build_optimizer(model, run_config.optimization)
     scheduler = WarmupCosineLRScheduler(optimizer, run_config.optimization)
-    criterion = MonoDriveTrainingLoss(run_config.loss_weights)
+    criterion = MonoDriveTrainingLoss(
+        run_config.loss_weights,
+        run_config.detection_class_weights,
+    )
 
     global_step = 0
     epoch = 0

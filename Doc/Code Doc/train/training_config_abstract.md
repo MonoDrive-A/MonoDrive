@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | `TrainingRunConfig` | dataclass | 训练主配置聚合对象。 |
 | `LossWeights` | dataclass | loss 权重配置。 |
+| `DetectionClassWeightConfig` | dataclass | 检测分类 CE 的 none / non-none 组权重策略。 |
 | `GradientMonitorConfig` | dataclass | 梯度监测配置。 |
 | `load_training_run_config` | function | 读取训练配置。 |
 
@@ -19,7 +20,7 @@
 
 ## 4. 使用规范
 
-配置路径和输出目录必须是项目内相对路径。实现端只读取和校验配置，不填补配置默认值。
+配置路径和输出目录必须是项目内相对路径。实现端只读取和校验配置，不填补配置默认值。检测分类权重模式支持 `auto`、`manual` 和 `disabled`。
 
 ## 5. 最小示例
 
@@ -33,4 +34,5 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：同步检测分类 none / non-none 类别权重配置摘要。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：新增训练配置解析摘要。 |

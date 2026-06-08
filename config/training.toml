@@ -46,6 +46,15 @@ agent_future_mse = 0.8
 map_class_ce = 0.8
 map_point_mse = 0.8
 
+[detection_class_weights]
+mode = "auto"
+agent_non_none_weight = 1.0
+agent_none_weight = 1.0
+map_non_none_weight = 1.0
+map_none_weight = 1.0
+auto_min_weight = 0.1
+auto_max_weight = 10.0
+
 [gradient_monitor]
 enabled = true
 check_interval_steps = 1

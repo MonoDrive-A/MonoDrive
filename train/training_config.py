@@ -11,6 +11,7 @@ from typing import Any, Mapping
 __all__ = [
     "CheckpointConfig",
     "DataLoaderConfig",
+    "DetectionClassWeightConfig",
     "GradientMonitorConfig",
     "LoggingConfig",
     "LossWeights",
@@ -23,6 +24,7 @@ __all__ = [
 
 
 SUPPORTED_DEVICES = {"auto", "cpu", "cuda"}
+SUPPORTED_DETECTION_CLASS_WEIGHT_MODES = {"auto", "manual", "disabled"}
 SUPPORTED_OPTIMIZERS = {"adamw"}
 
 
@@ -146,6 +148,48 @@ class LossWeights:
 
 
 @dataclass(frozen=True)
+class DetectionClassWeightConfig:
+    """检测分类 CE 的 none / non-none 类别权重配置。"""
+
+    mode: str
+    agent_non_none_weight: float
+    agent_none_weight: float
+    map_non_none_weight: float
+    map_none_weight: float
+    auto_min_weight: float
+    auto_max_weight: float
+
+    def __post_init__(self) -> None:
+        if self.mode not in SUPPORTED_DETECTION_CLASS_WEIGHT_MODES:
+            raise ValueError(
+                "detection_class_weights.mode 仅支持 "
+                f"{sorted(SUPPORTED_DETECTION_CLASS_WEIGHT_MODES)}，实际为 {self.mode!r}。"
+            )
+        for field_name in (
+            "agent_non_none_weight",
+            "agent_none_weight",
+            "map_non_none_weight",
+            "map_none_weight",
+        ):
+            value = getattr(self, field_name)
+            if value < 0.0:
+                raise ValueError(f"{field_name} 不能为负数，实际为 {value}。")
+        if self.agent_non_none_weight == 0.0 and self.agent_none_weight == 0.0:
+            raise ValueError("Agent 检测分类的 none 和 non-none 权重不能同时为 0。")
+        if self.map_non_none_weight == 0.0 and self.map_none_weight == 0.0:
+            raise ValueError("Map 检测分类的 none 和 non-none 权重不能同时为 0。")
+        if self.auto_min_weight <= 0.0:
+            raise ValueError(f"auto_min_weight 必须为正数，实际为 {self.auto_min_weight}。")
+        if self.auto_max_weight <= 0.0:
+            raise ValueError(f"auto_max_weight 必须为正数，实际为 {self.auto_max_weight}。")
+        if self.auto_min_weight > self.auto_max_weight:
+            raise ValueError(
+                "auto_min_weight 不能大于 auto_max_weight，"
+                f"实际为 {self.auto_min_weight} 和 {self.auto_max_weight}。"
+            )
+
+
+@dataclass(frozen=True)
 class GradientMonitorConfig:
     """梯度监测配置。"""
 
@@ -218,6 +262,7 @@ class TrainingRunConfig:
     dataloader: DataLoaderConfig
     optimization: OptimizationConfig
     loss_weights: LossWeights
+    detection_class_weights: DetectionClassWeightConfig
     gradient_monitor: GradientMonitorConfig
     checkpoint: CheckpointConfig
     logging: LoggingConfig
@@ -243,6 +288,7 @@ def load_training_run_config(
     dataloader_config = _require_table(raw_config, "dataloader")
     optimization_config = _require_table(raw_config, "optimization")
     loss_weights_config = _require_table(raw_config, "loss_weights")
+    detection_class_weights_config = _require_table(raw_config, "detection_class_weights")
     gradient_monitor_config = _require_table(raw_config, "gradient_monitor")
     checkpoint_config = _require_table(raw_config, "checkpoint")
     logging_config = _require_table(raw_config, "logging")
@@ -330,6 +376,21 @@ def load_training_run_config(
             agent_future_mse=_require_float(loss_weights_config, "agent_future_mse"),
             map_class_ce=_require_float(loss_weights_config, "map_class_ce"),
             map_point_mse=_require_float(loss_weights_config, "map_point_mse"),
+        ),
+        detection_class_weights=DetectionClassWeightConfig(
+            mode=_require_string(detection_class_weights_config, "mode"),
+            agent_non_none_weight=_require_float(
+                detection_class_weights_config,
+                "agent_non_none_weight",
+            ),
+            agent_none_weight=_require_float(detection_class_weights_config, "agent_none_weight"),
+            map_non_none_weight=_require_float(
+                detection_class_weights_config,
+                "map_non_none_weight",
+            ),
+            map_none_weight=_require_float(detection_class_weights_config, "map_none_weight"),
+            auto_min_weight=_require_float(detection_class_weights_config, "auto_min_weight"),
+            auto_max_weight=_require_float(detection_class_weights_config, "auto_max_weight"),
         ),
         gradient_monitor=GradientMonitorConfig(
             enabled=_require_bool(gradient_monitor_config, "enabled"),
