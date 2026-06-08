@@ -94,7 +94,6 @@ class TrainingDataConfig:
         if not self.h5_paths:
             raise ValueError("h5_paths 不能为空，至少需要一个 H5 文件。")
         for h5_path in self.h5_paths:
-            _ensure_project_relative_path(h5_path.resolve(), self.project_root, "h5_paths")
             if h5_path.suffix.lower() != ".h5":
                 raise ValueError(f"h5_paths 只能包含 .h5 文件，实际为 {h5_path}。")
         _ensure_project_relative_path(
@@ -833,19 +832,32 @@ def _resolve_h5_paths(table: Mapping[str, Any], project_root: Path) -> list[Path
             raise ValueError(f"dataset.h5_paths 必须为字符串列表，实际为 {value!r}。")
         raw_paths = [Path(item) for item in value]
     else:
-        h5_dir = _resolve_project_relative_path(table, "h5_dir", project_root)
+        h5_dir = _resolve_data_path(table, "h5_dir", project_root)
         if not h5_dir.exists():
             raise FileNotFoundError(f"dataset.h5_dir 不存在：{h5_dir}")
         raw_paths = sorted(h5_dir.glob("*.h5"))
     resolved_paths = []
     for raw_path in raw_paths:
-        path = raw_path if raw_path.is_absolute() else project_root / raw_path
-        resolved_path = path.resolve()
-        _ensure_project_relative_path(resolved_path, project_root, "h5_paths")
+        resolved_path = _resolve_data_path_from_value(raw_path, project_root)
         if not resolved_path.exists():
             raise FileNotFoundError(f"H5 文件不存在：{resolved_path}")
         resolved_paths.append(resolved_path)
     return resolved_paths
+
+
+def _resolve_data_path(
+    table: Mapping[str, Any],
+    key: str,
+    project_root: Path,
+) -> Path:
+    raw_path = Path(_require_string(table, key))
+    return _resolve_data_path_from_value(raw_path, project_root)
+
+
+def _resolve_data_path_from_value(raw_path: Path, project_root: Path) -> Path:
+    # 训练数据可能位于项目目录外；这里只解析读取路径，不用于写入。
+    path = raw_path if raw_path.is_absolute() else project_root / raw_path
+    return path.resolve()
 
 
 def _resolve_project_relative_path(

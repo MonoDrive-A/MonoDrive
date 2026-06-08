@@ -33,6 +33,8 @@
 
 训练入口应先读取 `config/training_data.toml`，再构建 Dataset 和 labels。调用方传入模型输出时，应使用 `model.detection_head.DetectionDecoderOutput` 和 `model.trajectory_vocab.TrajectoryDecoderOutput`。
 
+`dataset.h5_dir` 和 `dataset.h5_paths` 是只读数据源，允许使用项目外绝对路径；模型子配置路径仍要求位于项目目录内。
+
 本模块不实现危险轨迹判断，避免稀疏 H5 未来 Agent 标签造成错误监督。
 
 ## 5. 最小示例
@@ -52,3 +54,4 @@
 | --- | --- | --- |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增训练数据处理模块摘要。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：更新 Agent future 逐点 mask 和 Map 正反点序监督摘要。 |
+| 2026-06-08 | 1os3_Codex | AI 完成：记录 H5 只读数据源允许项目外绝对路径。 |

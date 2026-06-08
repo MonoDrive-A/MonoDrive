@@ -99,7 +99,7 @@ Map 匹配中，预测点反 Symlog 到 ego meter 空间计算点误差。`lane_
 - 数值空间：Hungarian matching 和轨迹 MSE 均在 FP32 物理空间执行。
 - 监督空间：匹配完成后的回归目标仍按模型输出空间构造，包括 Symlog、log1p 和 sin/cos。
 - 稀疏 H5：本文件不进行危险轨迹判断，也不使用当前帧 Agent 外推未来碰撞。
-- 路径安全：配置解析会拒绝项目目录外路径。
+- 路径口径：`dataset.h5_dir` 和 `dataset.h5_paths` 是只读数据源，允许使用项目外绝对路径；模块配置路径仍必须位于项目目录内。
 
 ## 9. 维护记录
 
@@ -107,3 +107,4 @@ Map 匹配中，预测点反 Symlog 到 ego meter 空间计算点误差。`lane_
 | --- | --- | --- |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增训练数据处理模块，支持 H5 样本过滤、轨迹词表标签、Agent/Map Hungarian matching，并移除危险轨迹判断。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：将 Agent future mask 改为 winner mode 逐点 mask，并让 Map 无方向类别监督沿用匹配时误差更小的点序。 |
+| 2026-06-08 | 1os3_Codex | AI 完成：放开 H5 只读数据源路径限制，允许 `h5_dir` 和 `h5_paths` 使用项目外绝对路径。 |
