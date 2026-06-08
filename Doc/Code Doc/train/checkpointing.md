@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | `CheckpointLoadResult` | NamedTuple | checkpoint 加载结果。 |
 | `capture_rng_state` | function | 捕获 Python、NumPy、PyTorch 和可选 CUDA RNG 状态。 |
-| `restore_rng_state` | function | 恢复 RNG 状态。 |
+| `restore_rng_state` | function | 恢复 RNG 状态，并把 PyTorch RNG state 规范化为 CPU `torch.uint8` 张量。 |
 | `save_checkpoint` | function | 保存 checkpoint 并更新 latest 文件。 |
 | `find_resume_checkpoint` | function | 按配置查找恢复路径。 |
 | `load_checkpoint` | function | 加载 checkpoint payload。 |
@@ -41,7 +41,7 @@
 
 保存时会写入 `step_{global_step:08d}.pt`，并额外更新配置中的 latest 文件。写入采用临时文件后替换目标文件，避免半写入 checkpoint。`keep_last` 大于 0 时会清理旧的 step checkpoint；latest 文件不参与清理。
 
-加载时使用 `torch.load(..., map_location=device)`，使恢复的张量落在训练设备上。RNG 状态由训练入口决定是否恢复。
+加载时使用 `torch.load(..., map_location=device)`，使恢复的张量落在训练设备上。RNG 状态由训练入口决定是否恢复；恢复前会把 PyTorch CPU/CUDA RNG state 从 tensor、NumPy 数组或 Python 序列统一转换为 CPU contiguous `torch.uint8`，避免 CUDA 恢复时 `torch.set_rng_state` 收到 CUDA ByteTensor。
 
 ## 6. 配置项
 
@@ -63,9 +63,11 @@
 
 - checkpoint、日志和训练输出不应提交到 Git。
 - 当前 checkpoint 保存 step、epoch 和 batch 位置；DataLoader 迭代器内部状态不单独序列化，训练入口通过固定 epoch seed 和 batch 跳过尽量复现恢复位置。
+- `torch.set_rng_state` 只接受 CPU `torch.ByteTensor`；因此恢复函数必须规范化经 `map_location=device` 加载后的 RNG state，不能直接传入 checkpoint 原值。
 
 ## 9. 维护记录
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：修复 CUDA 断点续训时 RNG state 被加载到非 CPU ByteTensor 导致 `torch.set_rng_state` 报错的问题。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：新增 checkpoint 保存与恢复模块。 |

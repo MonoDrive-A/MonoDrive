@@ -52,9 +52,13 @@ def restore_rng_state(state: dict[str, Any]) -> None:
     if "numpy" in state:
         np.random.set_state(state["numpy"])
     if "torch" in state:
-        torch.set_rng_state(state["torch"])
+        torch.set_rng_state(_normalize_rng_byte_tensor(state["torch"], "rng_state['torch']"))
     if "cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["cuda"])
+        cuda_states = [
+            _normalize_rng_byte_tensor(cuda_state, f"rng_state['cuda'][{state_index}]")
+            for state_index, cuda_state in enumerate(state["cuda"])
+        ]
+        torch.cuda.set_rng_state_all(cuda_states)
 
 
 def save_checkpoint(
@@ -124,6 +128,23 @@ def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
     temporary_path = path.with_name(f"{path.name}.tmp")
     torch.save(payload, temporary_path)
     temporary_path.replace(path)
+
+
+def _normalize_rng_byte_tensor(value: Any, field_name: str) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        rng_tensor = value.detach()
+    elif isinstance(value, np.ndarray):
+        rng_tensor = torch.from_numpy(value)
+    elif isinstance(value, (list, tuple)):
+        rng_tensor = torch.tensor(value, dtype=torch.uint8)
+    else:
+        raise TypeError(
+            f"{field_name} 必须是 torch.Tensor、numpy.ndarray、list 或 tuple，"
+            f"实际为 {type(value)!r}。"
+        )
+    if rng_tensor.dtype != torch.uint8:
+        rng_tensor = rng_tensor.to(dtype=torch.uint8)
+    return rng_tensor.cpu().contiguous()
 
 
 def _prune_old_checkpoints(config: CheckpointConfig) -> None:

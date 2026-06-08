@@ -11,7 +11,7 @@
 | `save_checkpoint` | function | 保存 checkpoint。 |
 | `find_resume_checkpoint` | function | 查找恢复路径。 |
 | `load_checkpoint` | function | 加载 checkpoint。 |
-| `capture_rng_state` / `restore_rng_state` | function | RNG 状态保存和恢复。 |
+| `capture_rng_state` / `restore_rng_state` | function | RNG 状态保存和恢复，恢复时规范化 PyTorch RNG byte tensor 的 device 和 dtype。 |
 
 ## 3. Shape 概览
 
@@ -27,10 +27,11 @@
 
 ## 6. 维护注意事项
 
-修改 checkpoint payload 字段时同步 schema、恢复逻辑和文档。
+修改 checkpoint payload 字段时同步 schema、恢复逻辑和文档。RNG state 恢复前必须转为 CPU contiguous `torch.uint8`，否则 CUDA 训练恢复时 `torch.set_rng_state` 会拒绝 CUDA ByteTensor。
 
 ## 7. 维护记录
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-08 | 1os3_Codex | AI 完成：记录 RNG state 恢复前的 CPU uint8 规范化。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：新增 checkpoint 摘要。 |
