@@ -149,16 +149,17 @@ class LossWeights:
 
 @dataclass(frozen=True)
 class DetectionClassWeightConfig:
-    """检测分类 CE 的 none / non-none 类别权重配置。"""
+    """检测分类 CE 的 none / non-none 类别权重配置。
+
+    `auto` 模式使用分组归一化 Focal Loss：none 与 non-none 两组分别求均值后等权
+    相加，focal gamma 按 batch 目标置信度在 `[1.0, 3.0]` 内自适应，无需额外超参。
+    """
 
     mode: str
     agent_non_none_weight: float
     agent_none_weight: float
     map_non_none_weight: float
     map_none_weight: float
-    auto_min_weight: float
-    auto_max_weight: float
-    auto_non_none_gradient_mass: float
 
     def __post_init__(self) -> None:
         if self.mode not in SUPPORTED_DETECTION_CLASS_WEIGHT_MODES:
@@ -179,20 +180,6 @@ class DetectionClassWeightConfig:
             raise ValueError("Agent 检测分类的 none 和 non-none 权重不能同时为 0。")
         if self.map_non_none_weight == 0.0 and self.map_none_weight == 0.0:
             raise ValueError("Map 检测分类的 none 和 non-none 权重不能同时为 0。")
-        if self.auto_min_weight <= 0.0:
-            raise ValueError(f"auto_min_weight 必须为正数，实际为 {self.auto_min_weight}。")
-        if self.auto_max_weight <= 0.0:
-            raise ValueError(f"auto_max_weight 必须为正数，实际为 {self.auto_max_weight}。")
-        if self.auto_min_weight > self.auto_max_weight:
-            raise ValueError(
-                "auto_min_weight 不能大于 auto_max_weight，"
-                f"实际为 {self.auto_min_weight} 和 {self.auto_max_weight}。"
-            )
-        if not 0.0 < self.auto_non_none_gradient_mass < 1.0:
-            raise ValueError(
-                "auto_non_none_gradient_mass 必须位于 (0, 1)，"
-                f"实际为 {self.auto_non_none_gradient_mass}。"
-            )
 
 
 @dataclass(frozen=True)
@@ -395,12 +382,6 @@ def load_training_run_config(
                 "map_non_none_weight",
             ),
             map_none_weight=_require_float(detection_class_weights_config, "map_none_weight"),
-            auto_min_weight=_require_float(detection_class_weights_config, "auto_min_weight"),
-            auto_max_weight=_require_float(detection_class_weights_config, "auto_max_weight"),
-            auto_non_none_gradient_mass=_require_float(
-                detection_class_weights_config,
-                "auto_non_none_gradient_mass",
-            ),
         ),
         gradient_monitor=GradientMonitorConfig(
             enabled=_require_bool(gradient_monitor_config, "enabled"),

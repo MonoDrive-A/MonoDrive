@@ -41,7 +41,7 @@
 
 轨迹词表概率监督使用 `trajectory_logit_soft_ce` 权重，对模型 raw logits 使用 soft cross entropy。标签由 `train/data_processing.py` 在物理空间按 inverse-MSE 构造，并保持为和为 1 的概率分布。
 
-Agent / Map 分类 CE 可通过 `[detection_class_weights]` 控制 none 与 non-none 组的相对权重。默认 `mode = "auto"` 时，`train/losses.py` 按当前 batch 的 raw logits 估算未加权 CE 对 logits 的梯度范数，并让 non-none 组获得 `auto_non_none_gradient_mass` 指定的组级梯度预算；`mode = "manual"` 时使用配置中的手动权重；`mode = "disabled"` 时保持未加类别权重的 CE。
+Agent / Map 分类 CE 可通过 `[detection_class_weights]` 控制 none 与 non-none 组的相对权重。默认 `mode = "auto"` 时，`train/losses.py` 使用分组归一化 Focal Loss：none 与 non-none 两组分别求 Focal 均值后等权相加，focal gamma 按 batch 目标置信度在 `[1.0, 3.0]` 内自适应；`mode = "manual"` 时使用配置中的手动权重；`mode = "disabled"` 时保持未加类别权重的 CE。
 
 ## 6. 配置项
 
@@ -58,14 +58,11 @@ Agent / Map 分类 CE 可通过 `[detection_class_weights]` 控制 none 与 non-
 | `optimization.warmup_steps` | `5000` | 线性 warmup step 数。 |
 | `optimization.cosine_decay_steps` | `5000` | 末尾余弦退火 step 数。 |
 | `loss_weights.*` | `1.0` | 各项 loss 权重。 |
-| `detection_class_weights.mode` | `auto` | 检测分类类别权重模式，支持 `auto`、`manual`、`disabled`。 |
+| `detection_class_weights.mode` | `auto` | 检测分类类别权重模式，支持 `auto`（分组 Focal）、`manual`、`disabled`。 |
 | `detection_class_weights.agent_non_none_weight` | `1.0` | 手动模式下 Agent 非 none 类别组权重。 |
 | `detection_class_weights.agent_none_weight` | `1.0` | 手动模式下 Agent none 类别权重。 |
 | `detection_class_weights.map_non_none_weight` | `1.0` | 手动模式下 Map 非 none 类别组权重。 |
 | `detection_class_weights.map_none_weight` | `1.0` | 手动模式下 Map none 类别权重。 |
-| `detection_class_weights.auto_min_weight` | `0.1` | 自动模式下动态类别权重下限。 |
-| `detection_class_weights.auto_max_weight` | `10.0` | 自动模式下动态类别权重上限。 |
-| `detection_class_weights.auto_non_none_gradient_mass` | `0.25` | 自动模式下 non-none 组目标 logits 梯度预算比例。 |
 | `gradient_monitor.*` | 见配置文件 | 梯度范数监测阈值和报告数量。 |
 | `checkpoint.output_dir` | `checkpoints/training` | checkpoint 保存目录。 |
 | `logging.output_dir` | `logs/training` | 指标日志目录。 |

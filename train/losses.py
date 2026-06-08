@@ -13,6 +13,11 @@ from train.data_processing import TrainingBatchLabels
 from train.training_config import DetectionClassWeightConfig, LossWeights
 
 
+_AUTO_FOCAL_GAMMA_MIN = 1.0
+_AUTO_FOCAL_GAMMA_MAX = 3.0
+_AUTO_FOCAL_GAMMA_BASE = 2.0
+
+
 __all__ = [
     "TrainingLossOutput",
     "MonoDriveTrainingLoss",
@@ -31,7 +36,7 @@ class MonoDriveTrainingLoss(nn.Module):
 
     Args:
         weights: `config/training.toml` 中读取的 loss 权重。
-        detection_class_weights: 检测分类 none / non-none 类别权重配置。
+        detection_class_weights: 检测分类 none / non-none 策略；`auto` 为分组归一化 Focal Loss。
 
     Shape:
         输入模型输出沿用 `MonoDriveBackboneOutput`。
@@ -236,43 +241,21 @@ def _detection_class_cross_entropy(
             f"实际最小/最大为 {target_min}/{target_max}。"
         )
 
-    class_weight = _build_detection_class_weight(
-        logits=flat_logits,
-        targets=flat_targets,
-        class_count=class_count,
-        none_index=none_index,
-        weight_config=weight_config,
-        non_none_weight=non_none_weight,
-        none_weight=none_weight,
-    )
-    return _weighted_cross_entropy(flat_logits, flat_targets, class_weight)
-
-
-def _build_detection_class_weight(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    class_count: int,
-    none_index: int,
-    weight_config: DetectionClassWeightConfig,
-    non_none_weight: float,
-    none_weight: float,
-) -> torch.Tensor | None:
     if weight_config.mode == "disabled":
-        return None
+        return _mean_cross_entropy(flat_logits, flat_targets)
     if weight_config.mode == "manual":
-        return _constant_detection_class_weight(
+        class_weight = _constant_detection_class_weight(
             class_count=class_count,
             none_index=none_index,
             non_none_weight=non_none_weight,
             none_weight=none_weight,
             device=targets.device,
         )
-    return _auto_detection_class_weight(
-        logits=logits,
-        targets=targets,
-        class_count=class_count,
+        return _weighted_cross_entropy(flat_logits, flat_targets, class_weight)
+    return _group_normalized_focal_loss(
+        logits=flat_logits,
+        targets=flat_targets,
         none_index=none_index,
-        weight_config=weight_config,
     )
 
 
@@ -293,70 +276,73 @@ def _constant_detection_class_weight(
     return class_weight
 
 
-def _auto_detection_class_weight(
+def _group_normalized_focal_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
-    class_count: int,
     none_index: int,
-    weight_config: DetectionClassWeightConfig,
-) -> torch.Tensor | None:
+) -> torch.Tensor:
+    """按 none / non-none 分组求 Focal Loss 均值，两组等权相加。"""
+
+    focal_gamma = _auto_focal_gamma(logits, targets)
+    focal_losses = _focal_cross_entropy_per_sample(logits, targets, focal_gamma)
     none_mask = targets == none_index
-    none_count = int(none_mask.sum().item())
-    non_none_count = int(targets.numel()) - none_count
-    if none_count == 0 or non_none_count == 0:
-        return None
-
-    gradient_norm = _cross_entropy_logit_gradient_norm(logits.detach(), targets)
-    none_gradient_sum = gradient_norm[none_mask].sum()
-    non_none_gradient_sum = gradient_norm[~none_mask].sum()
-    if not bool((none_gradient_sum > 0.0).item()) or not bool(
-        (non_none_gradient_sum > 0.0).item()
-    ):
-        return None
-
-    non_none_mass = weight_config.auto_non_none_gradient_mass
-    none_mass = 1.0 - non_none_mass
-    non_none_weight = non_none_mass / float(non_none_gradient_sum.item())
-    none_weight = none_mass / float(none_gradient_sum.item())
-    total_count = float(targets.numel())
-    mean_sample_weight = (
-        non_none_weight * float(non_none_count) + none_weight * float(none_count)
-    ) / total_count
-    if mean_sample_weight <= 0.0:
-        return None
-    non_none_weight = non_none_weight / mean_sample_weight
-    none_weight = none_weight / mean_sample_weight
-    class_weight = _constant_detection_class_weight(
-        class_count=class_count,
-        none_index=none_index,
-        non_none_weight=non_none_weight,
-        none_weight=none_weight,
-        device=targets.device,
-    )
-    return class_weight.clamp(
-        min=weight_config.auto_min_weight,
-        max=weight_config.auto_max_weight,
-    )
+    non_none_mask = ~none_mask
+    has_none = bool(none_mask.any().item())
+    has_non_none = bool(non_none_mask.any().item())
+    if has_non_none and has_none:
+        foreground_loss = focal_losses[non_none_mask].mean()
+        background_loss = focal_losses[none_mask].mean()
+        return foreground_loss + background_loss
+    if has_non_none:
+        return focal_losses[non_none_mask].mean()
+    if has_none:
+        return focal_losses[none_mask].mean()
+    return logits.sum() * 0.0
 
 
-def _cross_entropy_logit_gradient_norm(
+def _auto_focal_gamma(logits: torch.Tensor, targets: torch.Tensor) -> float:
+    """根据 batch 目标置信度自适应 focal gamma。"""
+
+    with torch.no_grad():
+        probabilities = torch.softmax(logits.detach(), dim=-1)
+        target_probabilities = probabilities.gather(
+            dim=1,
+            index=targets.unsqueeze(1),
+        ).squeeze(1)
+        if target_probabilities.numel() == 0:
+            return _AUTO_FOCAL_GAMMA_BASE
+        mean_confidence = float(target_probabilities.mean().item())
+        gamma = _AUTO_FOCAL_GAMMA_BASE + (mean_confidence - 0.5)
+        return max(_AUTO_FOCAL_GAMMA_MIN, min(_AUTO_FOCAL_GAMMA_MAX, gamma))
+
+
+def _focal_cross_entropy_per_sample(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    gamma: float,
+) -> torch.Tensor:
+    log_probabilities = F.log_softmax(logits, dim=-1)
+    log_target_probability = log_probabilities.gather(
+        dim=1,
+        index=targets.unsqueeze(1),
+    ).squeeze(1)
+    target_probability = log_target_probability.exp()
+    return -((1.0 - target_probability).clamp_min(0.0) ** gamma) * log_target_probability
+
+
+def _mean_cross_entropy(
     logits: torch.Tensor,
     targets: torch.Tensor,
 ) -> torch.Tensor:
-    probabilities = torch.softmax(logits.to(dtype=torch.float32), dim=-1)
-    target_probabilities = probabilities.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
-    squared_norm = probabilities.square().sum(dim=1) - 2.0 * target_probabilities + 1.0
-    return squared_norm.clamp_min(0.0).sqrt()
+    return F.cross_entropy(logits, targets)
 
 
 def _weighted_cross_entropy(
     logits: torch.Tensor,
     targets: torch.Tensor,
-    class_weight: torch.Tensor | None,
+    class_weight: torch.Tensor,
 ) -> torch.Tensor:
     losses = F.cross_entropy(logits, targets, reduction="none")
-    if class_weight is None:
-        return losses.mean()
     sample_weights = class_weight[targets]
     denominator = sample_weights.sum()
     if not bool((denominator > 0.0).item()):

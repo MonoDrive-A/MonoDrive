@@ -21,7 +21,7 @@
 
 ## 4. 使用规范
 
-传入 `MonoDriveBackboneOutput` 和 `TrainingBatchLabels`。轨迹词表分数在 loss 内部使用 `log_softmax` 计算 soft CE；Agent / Map 分类 CE 传入 raw logits，并按 `detection_class_weights.mode` 选择 `auto`、`manual` 或 `disabled`。`auto` 使用 `logits.detach()` 估算 CE 对 logits 的组级梯度范数，让 non-none 组获得配置的梯度预算；mode CE 只监督存在有效 future 点的匹配 query。
+传入 `MonoDriveBackboneOutput` 和 `TrainingBatchLabels`。轨迹词表分数在 loss 内部使用 `log_softmax` 计算 soft CE；Agent / Map 分类 CE 传入 raw logits，并按 `detection_class_weights.mode` 选择 `auto`（分组归一化 Focal Loss）、`manual` 或 `disabled`。`auto` 按 batch 目标置信度自适应 focal gamma，none / non-none 两组分别求均值后等权相加；mode CE 只监督存在有效 future 点的匹配 query。
 
 ## 5. 最小示例
 
