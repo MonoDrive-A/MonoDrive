@@ -212,7 +212,8 @@ class ValidatedTrainingDataset(Dataset[dict[str, Any]]):
             valid_indices = []
             for sample_index in range(len(base_dataset)):
                 sample = base_dataset[sample_index]
-                if _is_valid_sample(sample, config):
+                is_valid, _reason = _validate_sample(sample, config)
+                if is_valid:
                     valid_indices.append(sample_index)
             if not valid_indices:
                 raise ValueError("扫描 H5 后没有发现任何有效训练样本。")
@@ -224,14 +225,30 @@ class ValidatedTrainingDataset(Dataset[dict[str, Any]]):
         return len(self.valid_indices)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        sample = self.base_dataset[self.valid_indices[index]]
-        if not _is_valid_sample(sample, self.config):
-            raise ValueError(
-                "训练样本在读取时未通过数值校验，"
-                f"index={index}，source_index={self.valid_indices[index]}，"
-                f"h5_path={sample.get('h5_path')}，current_frame_id={sample.get('current_frame_id')}。"
-            )
-        return sample
+        if index < 0:
+            index += len(self.valid_indices)
+        if index < 0 or index >= len(self.valid_indices):
+            raise IndexError(f"index 超出范围：{index}，数据集长度为 {len(self.valid_indices)}。")
+
+        first_failure_reason = ""
+        first_failure_source_index = -1
+        # scan_on_init=False 或随机/外部数据变化时，读取阶段遇到坏样本直接向后寻找替代样本。
+        for offset in range(len(self.valid_indices)):
+            candidate_index = (index + offset) % len(self.valid_indices)
+            source_index = self.valid_indices[candidate_index]
+            sample = self.base_dataset[source_index]
+            is_valid, reason = _validate_sample(sample, self.config)
+            if is_valid:
+                return sample
+            if offset == 0:
+                first_failure_reason = reason
+                first_failure_source_index = source_index
+
+        raise ValueError(
+            "训练数据集中没有可替代的有效样本，"
+            f"首个失败 index={index}，source_index={first_failure_source_index}，"
+            f"原因={first_failure_reason}。"
+        )
 
     def close(self) -> None:
         """关闭底层 H5 句柄。"""
@@ -653,62 +670,115 @@ def inverse_symlog(values: torch.Tensor) -> torch.Tensor:
 
 
 def _is_valid_sample(sample: Mapping[str, Any], config: TrainingDataConfig) -> bool:
+    is_valid, _reason = _validate_sample(sample, config)
+    return is_valid
+
+
+def _validate_sample(sample: Mapping[str, Any], config: TrainingDataConfig) -> tuple[bool, str]:
     try:
         _require_finite_tensor(sample["images"], "images")
         if sample["images"].amin().item() < config.image_min or sample["images"].amax().item() > config.image_max:
-            return False
+            return False, (
+                "images 超出配置范围，"
+                f"期望 [{config.image_min}, {config.image_max}]，"
+                f"实际 [{sample['images'].amin().item()}, {sample['images'].amax().item()}]"
+            )
         future_trajectory = sample["future_trajectory"]
         _require_finite_tensor(future_trajectory, "future_trajectory")
         if future_trajectory.abs().amax().item() > config.future_trajectory_abs_max_m:
-            return False
+            return False, (
+                "future_trajectory 绝对值超出阈值，"
+                f"阈值={config.future_trajectory_abs_max_m}，"
+                f"实际={future_trajectory.abs().amax().item()}"
+            )
         ego_motion = sample["ego_motion"]
         _require_finite_tensor(ego_motion, "ego_motion")
         if ego_motion.abs().amax().item() > config.ego_motion_abs_max:
-            return False
+            return False, (
+                "ego_motion 绝对值超出阈值，"
+                f"阈值={config.ego_motion_abs_max}，实际={ego_motion.abs().amax().item()}"
+            )
         target_valid = sample["target_valid"]
         if target_valid.dtype != torch.bool or not bool(target_valid.any().item()):
-            return False
+            return False, (
+                "target_valid 无有效候选或 dtype 错误，"
+                f"dtype={target_valid.dtype}，any={bool(target_valid.any().item())}"
+            )
         _require_finite_tensor(sample["target_points"], "target_points")
-        if not _valid_agent_fields(sample, config):
-            return False
-        if not _valid_map_fields(sample, config):
-            return False
-    except (KeyError, TypeError, ValueError, RuntimeError):
-        return False
-    return True
+        agent_valid, agent_reason = _validate_agent_fields(sample, config)
+        if not agent_valid:
+            return False, agent_reason
+        map_valid, map_reason = _validate_map_fields(sample, config)
+        if not map_valid:
+            return False, map_reason
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+        return False, f"样本字段校验异常：{type(exc).__name__}: {exc}"
+    return True, ""
 
 
 def _valid_agent_fields(sample: Mapping[str, Any], config: TrainingDataConfig) -> bool:
+    is_valid, _reason = _validate_agent_fields(sample, config)
+    return is_valid
+
+
+def _validate_agent_fields(
+    sample: Mapping[str, Any],
+    config: TrainingDataConfig,
+) -> tuple[bool, str]:
     agent_boxes = sample["agent_boxes"]
     agent_valid = sample["agent_valid"]
     agent_future = sample["agent_future_trajectory"]
     _require_finite_tensor(agent_boxes, "agent_boxes")
     _require_finite_tensor(agent_future, "agent_future_trajectory")
     if agent_valid.dtype != torch.bool:
-        return False
+        return False, f"agent_valid dtype 必须为 bool，实际为 {agent_valid.dtype}"
     if not bool(agent_valid.any().item()):
-        return True
+        return True, ""
     valid_boxes = agent_boxes[agent_valid]
     if valid_boxes[:, 0:2].abs().amax().item() > config.agent_position_abs_max_m:
-        return False
+        return False, (
+            "agent_boxes 位置绝对值超出阈值，"
+            f"阈值={config.agent_position_abs_max_m}，"
+            f"实际={valid_boxes[:, 0:2].abs().amax().item()}"
+        )
     sizes = valid_boxes[:, 2:5]
     if sizes.amin().item() < config.agent_size_min_m or sizes.amax().item() > config.agent_size_max_m:
-        return False
+        return False, (
+            "agent_boxes 尺寸超出阈值，"
+            f"期望 [{config.agent_size_min_m}, {config.agent_size_max_m}]，"
+            f"实际 [{sizes.amin().item()}, {sizes.amax().item()}]"
+        )
     if valid_boxes[:, 6:10].abs().amax().item() > config.agent_motion_abs_max:
-        return False
-    return True
+        return False, (
+            "agent_boxes 运动字段绝对值超出阈值，"
+            f"阈值={config.agent_motion_abs_max}，"
+            f"实际={valid_boxes[:, 6:10].abs().amax().item()}"
+        )
+    return True, ""
 
 
 def _valid_map_fields(sample: Mapping[str, Any], config: TrainingDataConfig) -> bool:
+    is_valid, _reason = _validate_map_fields(sample, config)
+    return is_valid
+
+
+def _validate_map_fields(
+    sample: Mapping[str, Any],
+    config: TrainingDataConfig,
+) -> tuple[bool, str]:
     map_points = sample["map_points"]
     map_valid = sample["map_valid"]
     _require_finite_tensor(map_points, "map_points")
     if map_valid.dtype != torch.bool:
-        return False
+        return False, f"map_valid dtype 必须为 bool，实际为 {map_valid.dtype}"
     if bool(map_valid.any().item()):
         if map_points[map_valid].abs().amax().item() > config.map_position_abs_max_m:
-            return False
-    return True
+            return False, (
+                "map_points 位置绝对值超出阈值，"
+                f"阈值={config.map_position_abs_max_m}，"
+                f"实际={map_points[map_valid].abs().amax().item()}"
+            )
+    return True, ""
 
 
 def _agent_future_cost(

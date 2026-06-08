@@ -2,7 +2,7 @@
 
 ## 1. 文件基本功能
 
-`train/data_processing.py` 提供训练阶段数据处理：复用 H5 Dataset 读取样本，过滤无效数据，构造轨迹词表标签，并在物理空间对 Agent / Map 执行 Hungarian matching。
+`train/data_processing.py` 提供训练阶段数据处理：复用 H5 Dataset 读取样本，过滤或跳过无效数据，构造轨迹词表标签，并在物理空间对 Agent / Map 执行 Hungarian matching。
 
 ## 2. 主要公开接口
 
@@ -35,6 +35,8 @@
 
 `dataset.h5_dir` 和 `dataset.h5_paths` 是只读数据源，允许使用项目外绝对路径；模型子配置路径仍要求位于项目目录内。
 
+读取阶段遇到单个无效样本会向后寻找替代有效样本，不会终止训练；只有找不到任何有效样本时才抛出异常。
+
 本模块不实现危险轨迹判断，避免稀疏 H5 未来 Agent 标签造成错误监督。
 
 ## 5. 最小示例
@@ -55,3 +57,4 @@
 | 2026-06-07 | 1os3_Codex | AI 完成：新增训练数据处理模块摘要。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：更新 Agent future 逐点 mask 和 Map 正反点序监督摘要。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：记录 H5 只读数据源允许项目外绝对路径。 |
+| 2026-06-08 | 1os3_Codex | AI 完成：记录读取阶段跳过单个无效样本和失败原因。 |
