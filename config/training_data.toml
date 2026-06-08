@@ -1,8 +1,8 @@
 [dataset]
-h5_dir = "data/preprocessed"
+h5_dir = "../data/MonoDrive"
 normalize_images = true
 random_target_point = true
-scan_on_init = true
+scan_on_init = false
 
 [modules]
 detection_head_config_path = "config/detection_head.toml"
