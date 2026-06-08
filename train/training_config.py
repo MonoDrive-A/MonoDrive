@@ -151,8 +151,8 @@ class LossWeights:
 class DetectionClassWeightConfig:
     """检测分类 CE 的 none / non-none 类别权重配置。
 
-    `auto` 模式使用分组归一化 Focal Loss：none 与 non-none 两组分别求均值后等权
-    相加，focal gamma 按 batch 目标置信度在 `[1.0, 3.0]` 内自适应，无需额外超参。
+    `auto` 模式使用分组归一化 Focal Loss：匹配 query 只在前景类上竞争，未匹配 query 监督
+    none，背景组按 ``sqrt(N_fg / N_bg)`` 自动缩放，focal gamma 按组内目标置信度自适应。
     """
 
     mode: str

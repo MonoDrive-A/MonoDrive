@@ -14,8 +14,10 @@ from train.training_config import DetectionClassWeightConfig, LossWeights
 
 
 _AUTO_FOCAL_GAMMA_MIN = 1.0
-_AUTO_FOCAL_GAMMA_MAX = 3.0
+_AUTO_FOCAL_GAMMA_MAX = 4.0
 _AUTO_FOCAL_GAMMA_BASE = 2.0
+_AUTO_BACKGROUND_SCALE_MIN = 0.08
+_AUTO_BACKGROUND_SCALE_MAX = 1.0
 
 
 __all__ = [
@@ -281,27 +283,63 @@ def _group_normalized_focal_loss(
     targets: torch.Tensor,
     none_index: int,
 ) -> torch.Tensor:
-    """按 none / non-none 分组求 Focal Loss 均值，两组等权相加。"""
+    """匹配 / 未匹配分离的分组 Focal Loss。
 
-    focal_gamma = _auto_focal_gamma(logits, targets)
-    focal_losses = _focal_cross_entropy_per_sample(logits, targets, focal_gamma)
+    匹配 query 只在前景类上竞争（none 不参与 softmax），并额外用 objectness BCE
+    压低 none logit；未匹配 query 仍监督 none。背景组均值按 ``sqrt(N_fg / N_bg)`` 自动缩放。
+    """
+
     none_mask = targets == none_index
     non_none_mask = ~none_mask
     has_none = bool(none_mask.any().item())
     has_non_none = bool(non_none_mask.any().item())
-    if has_non_none and has_none:
-        foreground_loss = focal_losses[non_none_mask].mean()
-        background_loss = focal_losses[none_mask].mean()
-        return foreground_loss + background_loss
+
+    foreground_loss: torch.Tensor | None = None
     if has_non_none:
-        return focal_losses[non_none_mask].mean()
+        foreground_logits = logits[non_none_mask, :none_index]
+        foreground_targets = targets[non_none_mask]
+        none_logits = logits[non_none_mask, none_index]
+        foreground_gamma = _auto_focal_gamma(foreground_logits, foreground_targets)
+        class_loss = _focal_cross_entropy_per_sample(
+            foreground_logits,
+            foreground_targets,
+            foreground_gamma,
+        ).mean()
+        objectness_logits = torch.logsumexp(foreground_logits, dim=-1) - none_logits
+        objectness_loss = F.binary_cross_entropy_with_logits(
+            objectness_logits,
+            torch.ones_like(objectness_logits),
+        )
+        foreground_loss = class_loss + objectness_loss
+
+    background_loss: torch.Tensor | None = None
     if has_none:
-        return focal_losses[none_mask].mean()
+        background_logits = logits[none_mask]
+        background_targets = targets[none_mask]
+        background_gamma = _auto_focal_gamma(background_logits, background_targets)
+        background_loss = _focal_cross_entropy_per_sample(
+            background_logits,
+            background_targets,
+            background_gamma,
+        ).mean()
+
+    if foreground_loss is not None and background_loss is not None:
+        foreground_count = non_none_mask.sum().to(dtype=torch.float32)
+        background_count = none_mask.sum().to(dtype=torch.float32)
+        background_scale = (foreground_count / background_count).sqrt().clamp(
+            min=_AUTO_BACKGROUND_SCALE_MIN,
+            max=_AUTO_BACKGROUND_SCALE_MAX,
+        )
+        return foreground_loss + background_scale * background_loss
+    if foreground_loss is not None:
+        return foreground_loss
+    if background_loss is not None:
+        return background_loss
     return logits.sum() * 0.0
 
 
 def _auto_focal_gamma(logits: torch.Tensor, targets: torch.Tensor) -> float:
-    """根据 batch 目标置信度自适应 focal gamma。"""
+    """根据组内目标置信度自适应 focal gamma。"""
 
     with torch.no_grad():
         probabilities = torch.softmax(logits.detach(), dim=-1)

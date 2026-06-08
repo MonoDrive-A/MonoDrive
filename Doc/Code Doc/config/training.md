@@ -41,7 +41,7 @@
 
 轨迹词表概率监督使用 `trajectory_logit_soft_ce` 权重，对模型 raw logits 使用 soft cross entropy。标签由 `train/data_processing.py` 在物理空间按 inverse-MSE 构造，并保持为和为 1 的概率分布。
 
-Agent / Map 分类 CE 可通过 `[detection_class_weights]` 控制 none 与 non-none 组的相对权重。默认 `mode = "auto"` 时，`train/losses.py` 使用分组归一化 Focal Loss：none 与 non-none 两组分别求 Focal 均值后等权相加，focal gamma 按 batch 目标置信度在 `[1.0, 3.0]` 内自适应；`mode = "manual"` 时使用配置中的手动权重；`mode = "disabled"` 时保持未加类别权重的 CE。
+Agent / Map 分类 CE 可通过 `[detection_class_weights]` 控制 none 与 non-none 组的相对权重。默认 `mode = "auto"` 时，`train/losses.py` 使用匹配 / 未匹配分离的分组 Focal Loss：匹配 query 只在前景类上竞争，未匹配 query 监督 none，背景组按 `sqrt(N_fg / N_bg)` 自动缩放；`mode = "manual"` 时使用配置中的手动权重；`mode = "disabled"` 时保持未加类别权重的 CE。
 
 ## 6. 配置项
 
