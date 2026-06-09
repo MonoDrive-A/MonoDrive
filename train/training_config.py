@@ -24,8 +24,7 @@ __all__ = [
 
 
 SUPPORTED_DEVICES = {"auto", "cpu", "cuda"}
-SUPPORTED_DETECTION_CLASS_WEIGHT_MODES = {"auto", "matched", "manual", "disabled"}
-FOCAL_DETECTION_CLASS_WEIGHT_MODES = {"auto", "matched"}
+SUPPORTED_DETECTION_CLASS_WEIGHT_MODES = {"auto", "manual", "disabled"}
 SUPPORTED_OPTIMIZERS = {"adamw"}
 
 
@@ -155,9 +154,6 @@ class DetectionClassWeightConfig:
     `auto` 模式使用分组全类 Focal Loss：匹配 / 未匹配 query 均在完整 softmax 上监督硬标签，
     两组分别乘以 ``*_non_none_weight`` / ``*_none_weight``，背景组再按 ``sqrt(N_fg / N_bg)``
     自动缩放，focal gamma 按组内目标置信度自适应。
-
-    `matched` 模式同样使用分组全类 Focal Loss，但不再缩放背景组：non-none 始终全量监督，
-    none 仅在 ``N_none > N_fg`` 时无放回随机下采样至 ``N_fg``，两组各取均值后直接相加。
     """
 
     mode: str
