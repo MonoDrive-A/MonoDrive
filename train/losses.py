@@ -10,7 +10,11 @@ import torch.nn.functional as F
 
 from model.backbone import MonoDriveBackboneOutput
 from train.data_processing import TrainingBatchLabels
-from train.training_config import DetectionClassWeightConfig, LossWeights
+from train.training_config import (
+    FOCAL_DETECTION_CLASS_WEIGHT_MODES,
+    DetectionClassWeightConfig,
+    LossWeights,
+)
 
 
 _AUTO_FOCAL_GAMMA_MIN = 1.0
@@ -49,7 +53,7 @@ class MonoDriveTrainingLoss(nn.Module):
 
     Args:
         weights: `config/training.toml` 中读取的 loss 权重。
-        detection_class_weights: 检测分类 none / non-none 策略；`auto` 为分组全类 Focal Loss。
+        detection_class_weights: 检测分类 none / non-none 策略；`auto` / `matched` 为分组全类 Focal Loss。
 
     Shape:
         输入模型输出沿用 `MonoDriveBackboneOutput`。
@@ -191,7 +195,7 @@ class MonoDriveTrainingLoss(nn.Module):
             none_weight=self.detection_class_weights.map_none_weight,
             name="map_class_ce",
         )
-        if self.detection_class_weights.mode != "auto":
+        if self.detection_class_weights.mode not in FOCAL_DETECTION_CLASS_WEIGHT_MODES:
             return breakdown
         point_count = int(model_output.detection_output.map_points.shape[-2])
         point_dim = int(model_output.detection_output.map_points.shape[-1])
@@ -295,12 +299,22 @@ def _detection_class_cross_entropy(
             class_weight,
             none_index,
         )
-    return _group_separated_full_class_focal_loss(
+    if weight_config.mode == "matched":
+        return _group_separated_focal_loss(
+            logits=flat_logits,
+            targets=flat_targets,
+            none_index=none_index,
+            non_none_weight=non_none_weight,
+            none_weight=none_weight,
+            balance_strategy="matched_count",
+        )
+    return _group_separated_focal_loss(
         logits=flat_logits,
         targets=flat_targets,
         none_index=none_index,
         non_none_weight=non_none_weight,
         none_weight=none_weight,
+        balance_strategy="sqrt_scale",
     )
 
 
@@ -372,19 +386,41 @@ def _weighted_cross_entropy_breakdown(
     )
 
 
-def _group_separated_full_class_focal_loss(
+def _subsample_boolean_mask(mask: torch.Tensor, target_count: int) -> torch.Tensor:
+    """从 ``True`` 位置无放回随机采样 ``target_count`` 个，返回新的 bool mask。"""
+
+    selected_indices = mask.nonzero(as_tuple=True)[0]
+    if selected_indices.numel() <= target_count:
+        return mask
+    permuted = torch.randperm(selected_indices.numel(), device=selected_indices.device)[:target_count]
+    sampled_indices = selected_indices[permuted]
+    sampled_mask = torch.zeros_like(mask, dtype=torch.bool)
+    sampled_mask[sampled_indices] = True
+    return sampled_mask
+
+
+def _group_separated_focal_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
     none_index: int,
     non_none_weight: float,
     none_weight: float,
+    balance_strategy: str,
 ) -> _DetectionClassLossBreakdown:
     """匹配 / 未匹配分离的全类 Focal Loss。
 
     匹配 query 与未匹配 query 均在完整 softmax 上监督硬标签：前者目标为前景类，
-    后者目标为 none。两组分别求 Focal 均值后乘以 ``non_none_weight`` / ``none_weight``，
-    背景组再按 ``sqrt(N_fg / N_bg)`` 自动缩放以缓解 query 数量失衡。
+    后者目标为 none。两组分别求 Focal 均值后乘以 ``non_none_weight`` / ``none_weight``。
+
+    ``sqrt_scale`` 策略再按 ``sqrt(N_fg / N_bg)`` 缩放背景组；``matched_count`` 策略在
+    ``N_none > N_fg`` 时对 none 无放回随机下采样至 ``N_fg``，两组均值直接相加。
     """
+
+    if balance_strategy not in {"sqrt_scale", "matched_count"}:
+        raise ValueError(
+            "balance_strategy 仅支持 'sqrt_scale' 或 'matched_count'，"
+            f"实际为 {balance_strategy!r}。"
+        )
 
     none_mask = targets == none_index
     non_none_mask = ~none_mask
@@ -407,8 +443,13 @@ def _group_separated_full_class_focal_loss(
 
     background_loss: torch.Tensor | None = None
     if has_none:
-        background_logits = logits[none_mask]
-        background_targets = targets[none_mask]
+        effective_none_mask = none_mask
+        if balance_strategy == "matched_count" and has_non_none:
+            non_none_count = int(non_none_mask.sum().item())
+            if non_none_count > 0:
+                effective_none_mask = _subsample_boolean_mask(none_mask, non_none_count)
+        background_logits = logits[effective_none_mask]
+        background_targets = targets[effective_none_mask]
         background_gamma = _auto_focal_gamma(background_logits, background_targets)
         background_loss = (
             _focal_cross_entropy_per_sample(
@@ -421,6 +462,12 @@ def _group_separated_full_class_focal_loss(
 
     zero_loss = logits.sum() * 0.0
     if foreground_loss is not None and background_loss is not None:
+        if balance_strategy == "matched_count":
+            return _DetectionClassLossBreakdown(
+                total=foreground_loss + background_loss,
+                non_none=foreground_loss,
+                none=background_loss,
+            )
         foreground_count = non_none_mask.sum().to(dtype=torch.float32)
         background_count = none_mask.sum().to(dtype=torch.float32)
         background_scale = (foreground_count / background_count).sqrt().clamp(

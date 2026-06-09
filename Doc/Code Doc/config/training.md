@@ -58,7 +58,7 @@ Agent / Map 分类 CE 可通过 `[detection_class_weights]` 控制 none 与 non-
 | `optimization.warmup_steps` | `5000` | 线性 warmup step 数。 |
 | `optimization.cosine_decay_steps` | `5000` | 末尾余弦退火 step 数。 |
 | `loss_weights.*` | `1.0` | 各项 loss 权重。 |
-| `detection_class_weights.mode` | `auto` | 检测分类类别权重模式，支持 `auto`（分组 Focal）、`manual`、`disabled`。 |
+| `detection_class_weights.mode` | `auto` | 检测分类类别权重模式，支持 `auto`（分组 Focal + sqrt 缩放）、`matched`（分组 Focal + none 下采样配对）、`manual`、`disabled`。 |
 | `detection_class_weights.agent_non_none_weight` | `1.0` | 手动模式下 Agent 非 none 类别组权重。 |
 | `detection_class_weights.agent_none_weight` | `1.0` | 手动模式下 Agent none 类别权重。 |
 | `detection_class_weights.map_non_none_weight` | `1.0` | 手动模式下 Map 非 none 类别组权重。 |
@@ -83,6 +83,7 @@ Agent / Map 分类 CE 可通过 `[detection_class_weights]` 控制 none 与 non-
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-09 | 1os3_Composer | AI 完成：同步 `matched` 检测分类 none 下采样配对模式配置说明。 |
 | 2026-06-09 | 1os3_Composer | AI 完成：同步 `auto` 检测分类全类分组 Focal Loss 与组间权重配置说明。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：自动检测分类权重改为按当前 logits CE 梯度预算调整，默认 non-none 预算为 0.25。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：新增检测分类 none / non-none 类别权重配置，默认自动调整。 |
