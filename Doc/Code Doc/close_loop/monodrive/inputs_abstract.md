@@ -28,7 +28,7 @@
 
 - 图像 buffer 只存 `[0, 1]` FP32；DINO mean/std 由模型内部处理。
 - `ego_motion` / `target_point` 必须为物理米制量，Symlog 在模型内完成。
-- 摄像头分辨率必须为 1600×900（见 `model.image_geometry.SOURCE_HW`）。
+- 摄像头分辨率必须为 1600×900，即 `SOURCE_HW=(900, 1600)`。
 
 ## 5. 维护记录
 

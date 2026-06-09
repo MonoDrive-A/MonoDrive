@@ -40,11 +40,12 @@
 | --- | --- | --- |
 | `PAST_FRAMES` | 8 | 与 `config/vision_embedding.toml` 一致。 |
 | `TRAJECTORY_DT` | 0.5 | 与 B2D 2Hz 未来轨迹标签一致。 |
-| `FINAL_HW` | (288, 512) | 来自 `model.image_geometry.MODEL_HW`。 |
+| `FINAL_HW` | (288, 512) | 与 `config/vision_embedding.toml` 一致。 |
+| `SOURCE_HW` | (900, 1600) | Carla 摄像头原始分辨率 (H, W)。 |
 
 ## 5. 依赖关系
 
-- `model.image_geometry.resize_frame_chw`
+- `torch.nn.functional.interpolate`（双线性下采样）
 - `numpy`, `torch`
 
 ## 6. 维护记录

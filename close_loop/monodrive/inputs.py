@@ -21,16 +21,35 @@ from typing import Deque, Optional, Tuple
 
 import numpy as np
 import torch
-
-from model.image_geometry import MODEL_HW, SOURCE_HW, resize_frame_chw
+import torch.nn.functional as F
 
 
 # ─────────────────────────────────────────────────────────────
 # 图像 / ego buffer 常量（与训练对齐）
 # ─────────────────────────────────────────────────────────────
-FINAL_HW = MODEL_HW  # (288, 512)
+SOURCE_HW = (900, 1600)  # Carla 摄像头原始分辨率 (H, W)
+MODEL_HW = (288, 512)    # 模型输入分辨率 (H, W)，与 config/vision_embedding.toml 一致
+FINAL_HW = MODEL_HW
 PAST_FRAMES = 8
 TRAJECTORY_DT = 0.5  # 2Hz 未来轨迹标签间隔 (s)
+
+
+def resize_frame_chw(frame_chw: torch.Tensor, out_height: int, out_width: int) -> torch.Tensor:
+    """双线性下采样单帧 ``(3, H, W)`` FP32 图像到 ``(3, out_height, out_width)``。"""
+    if frame_chw.ndim != 3:
+        raise ValueError(
+            f"frame_chw 期望 shape 为 (3, H, W)，实际为 {tuple(frame_chw.shape)}。"
+        )
+    if int(frame_chw.shape[0]) != 3:
+        raise ValueError(f"frame_chw 通道数必须为 3，实际为 {frame_chw.shape[0]}。")
+    resized = F.interpolate(
+        frame_chw.unsqueeze(0),
+        size=(int(out_height), int(out_width)),
+        mode="bilinear",
+        align_corners=False,
+    )
+    return resized.squeeze(0).contiguous()
+
 
 
 def wrap_pi(x: float | np.ndarray) -> float | np.ndarray:
