@@ -89,9 +89,10 @@ class FrameBuffer:
         下采样到 (288, 512)，最后归一化到 [0, 1] 的 FP32。
         """
         if bgra.ndim == 3 and bgra.shape[-1] == 4:
-            rgb = bgra[..., :3][..., ::-1]   # BGRA -> RGB
+            # BGRA → RGB；必须 contiguous，避免 ``[..., ::-1]`` 负 stride 与只读 buffer。
+            rgb = np.ascontiguousarray(bgra[..., [2, 1, 0]])
         elif bgra.ndim == 3 and bgra.shape[-1] == 3:
-            rgb = bgra
+            rgb = np.ascontiguousarray(bgra)
         else:
             raise ValueError(f"期望 (H,W,3|4)，当前 shape={bgra.shape}")
         if self.source_hw is not None and rgb.shape[:2] != self.source_hw:
@@ -99,12 +100,7 @@ class FrameBuffer:
                 f"摄像头输出分辨率 {rgb.shape[:2]} != 期望 {self.source_hw}; "
                 f"请与 attach_front_camera 的 height/width 一致"
             )
-        t = (
-            torch.from_numpy(rgb).to(torch.float32)
-            .div_(255.0)
-            .permute(2, 0, 1)
-            .contiguous()
-        )  # (3, 900, 1600)
+        t = torch.from_numpy(rgb).to(torch.float32).div_(255.0).permute(2, 0, 1).contiguous()
         t = resize_frame_chw(t, FINAL_HW[0], FINAL_HW[1])
         self._buf.append(t)
 

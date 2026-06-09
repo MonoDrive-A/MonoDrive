@@ -825,17 +825,12 @@ def main() -> int:
             if args.all_lights_green and tick_i % 8 == 0:
                 set_all_traffic_lights_green(world, freeze=True)
 
-            # 拉一帧摄像头（同步模式下每个 tick 必有一帧；超时打印警告）
+            # 拉一帧摄像头（同步模式下每个 tick 应有一帧；阻塞等待）
             _t0 = time.perf_counter()
-            try:
-                image = image_q.get(timeout=2.0)
-            except queue.Empty:
-                logger.warning("tick %d: 摄像头超时无帧，跳过", tick_i)
-                continue
+            image = image_q.get()
 
             # 入 ring buffer
-            # 注意：bgra 是 raw_data 的 numpy view（只读底层 buffer）。模型必须拿
-            # **原始** 帧；后续若要在 MP4 上画 overlay，必须 .copy() 一份再画。
+            # bgra 来自 carla.Image.raw_data 的只读 buffer；FrameBuffer 内部会 copy。
             bgra = np.frombuffer(image.raw_data, dtype=np.uint8).reshape(image.height, image.width, 4)
             agent.push_camera_bgra(bgra)
             # ego 状态（w 由 yaw 差分，与训练侧一致）
