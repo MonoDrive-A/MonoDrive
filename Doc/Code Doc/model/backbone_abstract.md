@@ -2,7 +2,7 @@
 
 ## 1. 文件基本功能
 
-`model/backbone.py` 实现 MonoDrive 统一序列 Transformer 主干。它复用已有视觉嵌入、目标点嵌入、轨迹词表、检测查询和解码头，构造最终 2614 个 384 维 Token，执行 16 层 Pre-Norm Transformer，并输出检测和轨迹解码结果。第 1-12 层不输入目标点 Token；第 13 层输入前追加目标点 Token；检测头输入由第 12 层初始检测查询加骨干检测 Token 的零初始化线性残差构成。
+`model/backbone.py` 实现 MonoDrive 统一序列 Transformer 主干。它复用已有视觉嵌入、目标点嵌入、轨迹词表、检测查询和解码头，构造最终 2614 个 384 维 Token，执行 16 层 Pre-Norm Transformer，并输出检测和轨迹解码结果。第 1-12 层不输入目标点 Token；第 13 层输入前追加目标点 Token；检测头输入为第 12 层旁路累积 `Acc_{11}` cast 到 FP32。
 
 ## 2. 主要公开接口
 
@@ -19,11 +19,11 @@
 
 | 接口 | 输入 Shape | 输出 Shape |
 | --- | --- | --- |
-| `MonoDriveBackbone.forward` | `images: [B, 8, 3, 288, 512]`，`target_points: [B, 2]`，`ego_motion: [B, 3]` | `sequence_features: [B, 2614, 384]`，第 12 层检测输出，第 16 层轨迹输出 |
+| `MonoDriveBackbone.forward` | `images: [B, 8, 3, 288, 512]`，`target_points: [B, 2]`，`ego_motion: [B, 3]` | `sequence_features: [B, 2614, 384]`，第 12 层检测旁路累积，第 16 层轨迹输出 |
 | `load_backbone_config` | TOML 路径 | `BackboneConfig` |
 | `override_backbone_precision` | `BackboneConfig` 和 dtype 名称 | 新的 `BackboneConfig` |
 
-检测解码内部使用 `initial_detection_queries: [B, 48, 384]` 与第 12 层 `detection_residual_projection(detection_features): [B, 48, 384]` 相加。残差投影零初始化，因此初始化时检测头输入等于初始检测查询。
+检测解码：`Acc_{11}: [B, 48, 384]`（骨干精度）cast 到 FP32 后送入 `DetectionHeadDecoder`。前 12 层每层通过零初始化 $W_i$ 和 $E_i$ 做旁路残差与写回；`Query`（FP32）为累积种子。
 
 ## 4. 公开接口使用规范
 
@@ -41,9 +41,11 @@
 ## 6. 维护注意事项
 
 - RoPE 只作用于视觉 Token，基频从 `config/backbone.toml` 读取，当前为 `100.0`。
-- 检测残差投影层的初始权重和偏置必须为零；训练中该层正常学习残差。
+- 12 层检测残差投影和 12 层检测身份嵌入的初始权重必须为零；训练中正常学习。
+- 检测路径使用 per-layer 身份嵌入，不复用全局 `agent`/`map`。
 - 第 1-12 层不能包含目标点 Token；第 13-16 层使用单路 FFN。
-- 检测监督固定使用第 12 层输出，最终层只直接监督轨迹词表概率和残差。
+- 检测监督固定使用第 12 层旁路累积；最终层只直接监督轨迹词表概率和残差。
+- 精度：仅 `DetectionQueryEmbedding` 与 `DetectionHeadDecoder` 为 FP32，骨干中间默认 BF16。
 - FFN 结构必须保持为 $(D \rightarrow 4D)_{\mathrm{Layer1}} \rightarrow \mathrm{SwiGLU}(4D \rightarrow 2D) \rightarrow (2D \rightarrow D)_{\mathrm{Layer2}}$。
 - 模态独立 FFN 层索引是 0-based，当前为 `[1, 3, 5, 7, 9]`。
 - 修改 Token 数、shape、精度、RoPE 或解码口径时，同步更新完整文档、配置文档和 `doc/Code Doc/Index.md`。
@@ -52,6 +54,7 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Cursor | AI 完成：同步逐层旁路残差、per-layer 检测身份嵌入和 FP32/BF16 精度边界摘要。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：同步 16 层两阶段主干、Agent 16 / Map 32 检测查询和第 12 层检测监督摘要。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：记录检测查询加零初始化残差的解码口径。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增统一序列 Transformer 主干摘要文档。 |

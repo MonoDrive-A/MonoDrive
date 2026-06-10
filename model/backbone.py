@@ -275,7 +275,7 @@ class MonoDriveBackboneOutput(NamedTuple):
         `sequence_features`: `[B, 2614, D]`。
         `vision_features`: `[B, 2304, D]`。
         `register_features`: `[B, 4, D]`。
-        `detection_features`: 第 12 层输出，`[B, 48, D]`。
+        `detection_features`: 第 12 层旁路累积结果 Acc_11，`[B, 48, D]`，骨干精度。
         `trajectory_features`: `[B, 256, D]`。
         `trajectory_decoder_features`: `[B, 256, D]`。
         `goal_features`: `[B, 2, D]`。
@@ -555,7 +555,13 @@ class MonoDriveBackbone(nn.Module):
         self.detection_query_embedding = DetectionQueryEmbedding(self.detection_config)
         self.trajectory_decoder = TrajectoryVocabularyDecoder(self.trajectory_config)
         self.detection_decoder = DetectionHeadDecoder(self.detection_config)
-        self.detection_residual_projection = nn.Linear(config.hidden_dim, config.hidden_dim)
+        self.detection_residual_projections = nn.ModuleList(
+            nn.Linear(config.hidden_dim, config.hidden_dim)
+            for _ in range(GOAL_TOKEN_INSERT_LAYER_INDEX)
+        )
+        self.detection_layer_identity_embeddings = nn.Parameter(
+            torch.zeros(GOAL_TOKEN_INSERT_LAYER_INDEX, 2, config.hidden_dim)
+        )
         self.token_type_to_index = {
             token_type: index for index, token_type in enumerate(config.token_type_order)
         }
@@ -580,7 +586,6 @@ class MonoDriveBackbone(nn.Module):
         _force_parameter_to_float32(self.token_type_embeddings)
         _force_parameter_to_float32(self.register_tokens)
         _force_floating_tensors_to_float32(self.ego_motion_encoder)
-        _force_floating_tensors_to_float32(self.detection_residual_projection)
         return self
 
     def forward(
@@ -604,11 +609,15 @@ class MonoDriveBackbone(nn.Module):
             images.device,
             token_slices,
         )
-        token_features = input_sequence.token_features
+        backbone_dtype = self.config.backbone_torch_dtype
+        token_features = input_sequence.token_features.to(dtype=backbone_dtype)
+        accumulated_detection_queries = input_sequence.initial_detection_queries.to(
+            dtype=backbone_dtype,
+        )
 
         detection_features: torch.Tensor | None = None
         layer_vision_features = []
-        with _precision_context(images.device, self.config.backbone_torch_dtype):
+        with _precision_context(images.device, backbone_dtype):
             for layer_index, transformer_block in enumerate(self.transformer_blocks):
                 if layer_index == GOAL_TOKEN_INSERT_LAYER_INDEX:
                     token_features = self._append_goal_tokens(
@@ -618,17 +627,23 @@ class MonoDriveBackbone(nn.Module):
                         token_slices,
                     )
                 token_features = transformer_block(token_features, visual_positions, token_slices)
+                if layer_index < GOAL_TOKEN_INSERT_LAYER_INDEX:
+                    token_features, accumulated_detection_queries = (
+                        self._apply_detection_layer_residual(
+                            token_features,
+                            accumulated_detection_queries,
+                            layer_index,
+                            token_slices,
+                        )
+                    )
                 if layer_index == DETECTION_OUTPUT_LAYER_INDEX:
-                    detection_features = self._split_sequence_features(
-                        token_features,
-                        token_slices,
-                    )["detection"]
+                    detection_features = accumulated_detection_queries
                 if return_layer_features:
                     layer_vision_features.append(token_features[:, token_slices.vision, :].detach())
 
         if detection_features is None:
             raise RuntimeError(
-                "未能取得第 12 层检测 Token 输出，"
+                "未能取得第 12 层检测 Token 旁路累积结果，"
                 f"layer_count={self.config.layer_count}。"
             )
         split_features = self._split_sequence_features(token_features, token_slices)
@@ -636,10 +651,7 @@ class MonoDriveBackbone(nn.Module):
             split_features["trajectory"],
             ego_motion,
         )
-        detection_decoder_features = self._prepare_detection_decoder_features(
-            detection_features,
-            input_sequence.initial_detection_queries,
-        )
+        detection_decoder_features = accumulated_detection_queries.to(dtype=torch.float32)
         detection_output = self.detection_decoder(detection_decoder_features)
         trajectory_output = self.trajectory_decoder(trajectory_decoder_features)
         return MonoDriveBackboneOutput(
@@ -669,8 +681,10 @@ class MonoDriveBackbone(nn.Module):
                 std=self.config.ego_motion_linear_std,
             )
             self.ego_motion_encoder.bias.zero_()
-            self.detection_residual_projection.weight.zero_()
-            self.detection_residual_projection.bias.zero_()
+            for detection_residual_projection in self.detection_residual_projections:
+                detection_residual_projection.weight.zero_()
+                detection_residual_projection.bias.zero_()
+            self.detection_layer_identity_embeddings.zero_()
 
     def _validate_subconfigs(self) -> None:
         expected_hidden_dims = {
@@ -808,9 +822,10 @@ class MonoDriveBackbone(nn.Module):
         vision_tokens = vision_tokens.to(dtype=torch.float32)
         vision_tokens = self._add_type_embedding(vision_tokens, "vision")
         register_tokens = self._add_type_embedding(register_tokens, "register")
-        detection_tokens = self._add_detection_type_embeddings(
-            initial_detection_queries,
-            token_slices,
+        detection_tokens = self._add_detection_layer_identity_embeddings(
+            initial_detection_queries.to(dtype=self.config.backbone_torch_dtype),
+            layer_index=0,
+            token_slices=token_slices,
         )
         trajectory_tokens = self._add_type_embedding(trajectory_tokens, "trajectory")
         return _BackboneInputSequence(
@@ -857,22 +872,69 @@ class MonoDriveBackbone(nn.Module):
         )
         return token_features.to(dtype=torch.float32) + type_embedding
 
-    def _add_detection_type_embeddings(
+    def _add_detection_layer_identity_embeddings(
         self,
-        detection_tokens: torch.Tensor,
+        detection_queries: torch.Tensor,
+        layer_index: int,
         token_slices: BackboneTokenSlices,
     ) -> torch.Tensor:
+        """为检测查询叠加指定层的 agent/map 专用身份嵌入。
+
+        Args:
+            detection_queries: `[B, 48, hidden_dim]`，不含身份嵌入的检测查询。
+            layer_index: 检测旁路层号，取值范围 `[0, GOAL_TOKEN_INSERT_LAYER_INDEX)`。
+            token_slices: 统一序列切片。
+
+        Returns:
+            `[B, 48, hidden_dim]`，叠加本层身份嵌入后的检测 Token。
+        """
+        if layer_index < 0 or layer_index >= GOAL_TOKEN_INSERT_LAYER_INDEX:
+            raise ValueError(
+                "layer_index 必须满足 0 <= layer_index < GOAL_TOKEN_INSERT_LAYER_INDEX，"
+                f"实际为 {layer_index}。"
+            )
         agent_count = token_slices.agent.stop - token_slices.agent.start
         map_count = token_slices.map.stop - token_slices.map.start
-        agent_tokens = detection_tokens[:, :agent_count, :]
-        map_tokens = detection_tokens[:, agent_count : agent_count + map_count, :]
-        return torch.cat(
-            (
-                self._add_type_embedding(agent_tokens, "agent"),
-                self._add_type_embedding(map_tokens, "map"),
-            ),
-            dim=1,
+        layer_embeddings = self.detection_layer_identity_embeddings[layer_index].to(
+            device=detection_queries.device,
+            dtype=detection_queries.dtype,
         )
+        agent_tokens = detection_queries[:, :agent_count, :] + layer_embeddings[0]
+        map_tokens = (
+            detection_queries[:, agent_count : agent_count + map_count, :]
+            + layer_embeddings[1]
+        )
+        return torch.cat((agent_tokens, map_tokens), dim=1)
+
+    def _apply_detection_layer_residual(
+        self,
+        token_features: torch.Tensor,
+        accumulated_detection_queries: torch.Tensor,
+        layer_index: int,
+        token_slices: BackboneTokenSlices,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """在第 layer_index 层 Transformer 输出后执行检测 Token 旁路残差更新。
+
+        Args:
+            token_features: `[B, L, hidden_dim]`，当前层 Transformer 输出。
+            accumulated_detection_queries: `[B, 48, hidden_dim]`，不含身份嵌入的旁路累积状态。
+            layer_index: 当前层号，取值范围 `[0, GOAL_TOKEN_INSERT_LAYER_INDEX)`。
+            token_slices: 统一序列切片。
+
+        Returns:
+            写回检测切片后的 `token_features` 与更新后的 `accumulated_detection_queries`。
+        """
+        detection_output = token_features[:, token_slices.detection, :]
+        detection_residual = self.detection_residual_projections[layer_index](detection_output)
+        accumulated_detection_queries = accumulated_detection_queries + detection_residual
+        updated_detection_tokens = self._add_detection_layer_identity_embeddings(
+            accumulated_detection_queries,
+            layer_index,
+            token_slices,
+        )
+        token_features = token_features.clone()
+        token_features[:, token_slices.detection, :] = updated_detection_tokens
+        return token_features, accumulated_detection_queries
 
     def _split_sequence_features(
         self,
@@ -902,27 +964,6 @@ class MonoDriveBackbone(nn.Module):
                 )
             ego_motion_features = self.ego_motion_encoder(ego_motion_fp32)
             return trajectory_features.to(dtype=torch.float32) + ego_motion_features[:, None, :]
-
-    def _prepare_detection_decoder_features(
-        self,
-        detection_features: torch.Tensor,
-        initial_detection_queries: torch.Tensor,
-    ) -> torch.Tensor:
-        if tuple(detection_features.shape) != tuple(initial_detection_queries.shape):
-            raise ValueError(
-                "detection_features 与 initial_detection_queries 的 shape 必须一致，"
-                f"实际为 {tuple(detection_features.shape)} 和 {tuple(initial_detection_queries.shape)}。"
-            )
-        with _disabled_autocast(detection_features):
-            detection_residual = self.detection_residual_projection(
-                detection_features.to(dtype=torch.float32)
-            )
-            # 零初始化残差层保证初始化时检测解码输入严格等于原始检测查询。
-            return initial_detection_queries.to(
-                device=detection_features.device,
-                dtype=torch.float32,
-            ) + detection_residual
-
 
 def load_backbone_config(
     config_path: str | Path,
