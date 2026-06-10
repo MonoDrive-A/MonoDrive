@@ -17,7 +17,7 @@
 | 项目 | 说明 |
 | --- | --- |
 | 模型输入 | `images [1,8,3,288,512]`, `target_points [1,2]`, `ego_motion [1,3]` |
-| winner | `argmax(softmax(logits))`，可选迟滞 / 强制索引 |
+| winner | `argmax(softmax(logits))`，可选 ``force_winner_idx`` 强制索引 |
 | 纵向差分 | 轨迹点间隔 `TRAJECTORY_DT=0.5s` |
 | 仿真 tick | `dt=0.125s`（8 FPS），用于 yaw_rate 与 PID |
 

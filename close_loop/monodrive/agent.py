@@ -5,7 +5,7 @@
 
 - **完整主干**：``MonoDriveBackbone(images, target_points, ego_motion)`` 输出 256 路
   轨迹词表 logit 与 Tanh 残差；词表 + 残差反 Symlog 得物理轨迹。
-- **winner**：``winner_idx = softmax(logits).argmax(-1)``，可选迟滞与强制索引。
+- **winner**：``winner_idx = softmax(logits).argmax(-1)``，可选强制索引。
 - **控制**：
     * 横向：在 winner 折线或 committed 世界系路径上 pure-pursuit + PIDLateralController。
     * 纵向：对 winner ``(x,y)`` 折线按 ``TRAJECTORY_DT=0.5s`` 差分得 v/a，再经 PID / 前馈。
@@ -296,7 +296,6 @@ class MonoDriveAgent:
         goal_min_dist_m: float = GOAL_MIN_DIST_M,
         goal_max_dist_m: float = GOAL_MAX_DIST_M,
         goal_hold_ticks: int = 1,
-        winner_hysteresis: float = 0.15,
         use_residual: bool = True,
         diagnostic_dir: Optional[str] = None,
         diagnostic_every: int = 1,
@@ -352,8 +351,6 @@ class MonoDriveAgent:
             goal_hold_ticks: goal 在世界系中保持不变的 tick 数（默认 1 = 每 tick 重选）。
                              训练 anchor 的 ``||target_point||`` 应在 24–30 m；
                              hold > 1 时 ego 逼近目标后可能落入 OOD。
-            winner_hysteresis: re-plan 时新 argmax 相对上一 winner 的 prob 领先不足该值则
-                               保持上一 winner，减轻 mode 0 等 flicker（0 = 关闭）。
             use_residual: 解码时是否叠加 Tanh 残差修正；``False`` 时仅用词表 Symlog 轨迹
                          （CLI ``--no-residual``）。
             diagnostic_dir: 若指定，则每次 re-plan 把输入与 top-k 轨迹 dump 成 PNG + NPZ。
@@ -433,7 +430,6 @@ class MonoDriveAgent:
                 f"实际为 {self.goal_min_dist_m} > {self.goal_max_dist_m}"
             )
         self.goal_hold_ticks = max(1, int(goal_hold_ticks))
-        self.winner_hysteresis = max(0.0, float(winner_hysteresis))
         self.use_residual = bool(use_residual)
         self.diagnostic_dir = Path(diagnostic_dir).expanduser().resolve() if diagnostic_dir else None
         self.diagnostic_every = max(1, int(diagnostic_every))
@@ -456,7 +452,6 @@ class MonoDriveAgent:
         self._held_goal_xy: Optional[np.ndarray] = None
         self._last_goal_idx: int = 0
         self._goal_age_ticks: int = 0
-        self._prev_winner_idx: int = -1
 
         # SOTA 风格「持有轨迹」：上一次跑模型生成的世界系 winner 轨迹。
         # 在 replan_every-1 个 tick 内只读不写，控制器在它上面做 pure-pursuit。
@@ -680,7 +675,7 @@ class MonoDriveAgent:
         return self._held_goal_xy, self._last_goal_idx, refreshed
 
     def _select_winner_idx(self, probs: torch.Tensor) -> int:
-        """``probs.argmax`` + 可选迟滞，减轻 mode flicker。"""
+        """``probs.argmax``，或 ``force_winner_idx`` 强制覆盖。"""
         if probs.ndim == 1:
             probs = probs.unsqueeze(0)
         n_traj_runtime = int(probs.shape[-1])
@@ -691,29 +686,9 @@ class MonoDriveAgent:
                     "force_winner_idx=%d 超出 [0, %d)，本次回退到 probs.argmax",
                     forced, n_traj_runtime,
                 )
-                raw = int(probs.argmax(dim=-1).item())
-            else:
-                self._prev_winner_idx = forced
-                return forced
-        else:
-            raw = int(probs.argmax(dim=-1).item())
-
-        if self.winner_hysteresis <= 0.0 or self._prev_winner_idx < 0:
-            self._prev_winner_idx = raw
-            return raw
-
-        prev = self._prev_winner_idx
-        winner = raw
-        if winner != prev and 0 <= prev < n_traj_runtime:
-            delta = float(probs[0, winner].item()) - float(probs[0, prev].item())
-            if delta < self.winner_hysteresis:
-                logger.debug(
-                    "winner hysteresis: keep %d over argmax %d (Δp=%.3f < %.3f)",
-                    prev, winner, delta, self.winner_hysteresis,
-                )
-                winner = prev
-        self._prev_winner_idx = winner
-        return winner
+                return int(probs.argmax(dim=-1).item())
+            return forced
+        return int(probs.argmax(dim=-1).item())
 
     # ─────────────────────────────────────────────────────────────
     def _run_inference(self, ego_loc: carla.Location) -> _InferBundle:

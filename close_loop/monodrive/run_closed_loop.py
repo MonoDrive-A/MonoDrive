@@ -172,13 +172,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--winner-hysteresis", type=float, default=0.15,
-        help=(
-            "re-plan 时新 argmax 相对上一 winner 的 prob 领先不足该值则保持上一 winner，"
-            "减轻切到 mode 0 的 flicker（0 = 关闭）。"
-        ),
-    )
-    p.add_argument(
         "--diagnostic-dir", type=str, default=None,
         help=(
             "诊断 dump 目录。开启后，每次模型推理把 frames / ego_motion / target_point / "
@@ -764,7 +757,6 @@ def main() -> int:
             goal_min_dist_m=args.goal_min_dist_m,
             goal_max_dist_m=args.goal_max_dist_m,
             goal_hold_ticks=args.goal_hold_ticks,
-            winner_hysteresis=args.winner_hysteresis,
             use_residual=not args.no_residual,
             diagnostic_dir=args.diagnostic_dir,
             diagnostic_every=args.diagnostic_every,
@@ -778,8 +770,6 @@ def main() -> int:
             args.goal_hold_ticks,
             args.goal_hold_ticks * 0.125,
         )
-        if args.winner_hysteresis > 0:
-            logger.info("Winner 迟滞: Δprob >= %.2f 才切换 mode", args.winner_hysteresis)
         if args.force_winner_idx is not None:
             logger.info("已强制 winner_idx=%d（忽略 probs.argmax）", args.force_winner_idx)
         if args.legacy_tracking:
