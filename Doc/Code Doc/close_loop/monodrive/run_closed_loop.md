@@ -31,6 +31,8 @@ Carla Town10HD（或可配置地图）闭环评测脚本：world 同步设置、
 | `goal-max-dist-m` | 30.0 |
 | `camera-fov` | 70.0 |
 | `viz-top-k` | 8 |
+| `export-h5` | 无（可选，写出会话级 `b2d_h5_v5` H5） |
+| `diagnostic-every` | 1（同时控制 H5 采样频率） |
 
 ## 5. 依赖关系
 
@@ -41,6 +43,7 @@ Carla Town10HD（或可配置地图）闭环评测脚本：world 同步设置、
 
 | 日期 | 修改人 | 说明 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Composer | AI 完成：新增 `--export-h5`，运行结束时写出开环兼容 H5。 |
 | 2026-06-10 | FuZiR_Cursor | 仿真 tick 改为 5Hz（`fixed_delta_seconds=0.2`）。 |
 
 | 2026-06-09 | FuZiR_Cursor | 模块路径改为 `close_loop.monodrive.run_closed_loop`。 |

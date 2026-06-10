@@ -44,6 +44,8 @@
 | `goal_min_dist_m` | 24.0 | 目标点最小直线距离 (m) |
 | `goal_max_dist_m` | 30.0 | 目标点最大直线距离 (m) |
 | `use_residual` | True | 是否叠加 Tanh 残差；CLI ``--no-residual`` 关闭 |
+| `export_h5_path` | None | 会话级 `b2d_h5_v5` H5 输出路径 |
+| `diagnostic_dir` | None | 诊断目录（PNG/NPZ + 单样本 H5） |
 
 ## 5. 依赖关系
 
@@ -56,4 +58,5 @@
 
 | 日期 | 修改人 | 说明 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Composer | AI 完成：新增 `export_h5_path`、`finalize_h5_export()` 与开环兼容 H5 累积导出。 |
 | 2026-06-09 | FuZiR_Cursor | JEPA 8-mode 头替换为 MonoDrive 256 词表解码。 |
