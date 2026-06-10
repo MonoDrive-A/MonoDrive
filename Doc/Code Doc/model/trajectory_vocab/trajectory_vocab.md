@@ -14,7 +14,7 @@
 | `TrajectoryVocabData` | dataclass | 保存加载后的物理、Symlog、归一化词表和缩放系数。 |
 | `TrajectoryDecoderOutput` | NamedTuple | 解码层输出，包含 logits 和 residuals。 |
 | `TrajectoryVocabularyEmbedding` | class | 将已归一化词表编码为 `[256, 384]` 轨迹查询特征。 |
-| `TrajectoryVocabularyDecoder` | class | 单层线性头解码 logits 和 Tanh 残差。 |
+| `TrajectoryVocabularyDecoder` | class | TokenRMSNorm + 线性头解码 logits 和 Tanh 残差。 |
 | `load_trajectory_vocab_config` | function | 读取 TOML 配置并构造 `TrajectoryVocabModelConfig`。 |
 | `load_trajectory_vocabulary` | function | 从 `.npz` 加载并校验轨迹词表。 |
 
@@ -26,7 +26,7 @@
 - 输入：`config/trajectory_vocab.toml`。
 - 输出：供加载、嵌入和解码模块使用的只读配置对象。
 - Shape：`trajectory_shape` 为 `[256, 6, 2]`，`high_frequency_encoding_dim` 为 `1536`。
-- 关键参数：`hidden_dim`、`frequency_count`、`swiglu_hidden_dim`、`logit_init_value`、`residual_output_init_value`。
+- 关键参数：`hidden_dim`、`frequency_count`、`swiglu_hidden_dim`、`logit_init_value`、`residual_output_init_value`、`rms_norm_eps`。
 
 ### `TrajectoryVocabData`
 
@@ -46,11 +46,11 @@
 
 ### `TrajectoryVocabularyDecoder`
 
-- 功能：单层线性层从轨迹 token 特征输出轨迹词表 logit 和残差。
+- 功能：`TokenRMSNorm -> Linear` 从轨迹 token 特征输出轨迹词表 logit 和残差。
 - 输入：`trajectory_features`，shape 为 `[B, 256, 384]`，可来自 BF16 主干但会在本模块内转为 FP32。
 - 输出：FP32 `TrajectoryDecoderOutput`。
 - Shape：`logits` 为 `[B, 256]`，`residuals` 为 `[B, 256, 6, 2]`。
-- 关键参数：`logit_init_value=1.0`，`residual_output_init_value=0.0`，`residual_activation=tanh`。
+- 关键参数：`logit_init_value=1.0`，`residual_output_init_value=0.0`，`residual_activation=tanh`，`rms_norm_eps=1e-6`。
 
 ### `load_trajectory_vocab_config`
 
@@ -96,9 +96,9 @@ $$
 
 代码中由 `frequency_scale / frequency_base ** (i / frequency_count)` 表示，当前配置为 `frequency_scale=2π`、`frequency_base=10`、`frequency_count=64`。单个坐标的编码顺序为 `[sin_0, cos_0, ..., sin_63, cos_63]`；每个时间步按 `[phi_y(y), phi_x(x)]` 拼接，再展平进入 `Linear -> SwiGLU -> Linear`，输出 384 维轨迹查询特征。SwiGLU 激活来自公共模块 `model/swiglu.py`，轨迹词表文件不再维护私有激活实现。
 
-轨迹词表嵌入和解码组件都强制保持 FP32 精度。模块初始化和 `_apply()` 结束后会把所有浮点参数、buffer 和已有梯度恢复为 FP32，避免父模型整体 `.to(dtype=torch.bfloat16)` 时误改本模块精度。`forward` 内部使用禁用 autocast 的上下文，嵌入层的高频编码、两层线性映射、解码层线性头和 Tanh 残差激活均在 FP32 下执行；解码输入如果来自 BF16 Transformer 主干，会先转为 FP32。
+轨迹词表嵌入和解码组件都强制保持 FP32 精度。模块初始化和 `_apply()` 结束后会把所有浮点参数、buffer 和已有梯度恢复为 FP32，避免父模型整体 `.to(dtype=torch.bfloat16)` 时误改本模块精度。`forward` 内部使用禁用 autocast 的上下文，嵌入层的高频编码、两层线性映射、解码前 `TokenRMSNorm`、解码层线性头和 Tanh 残差激活均在 FP32 下执行；解码输入如果来自 BF16 Transformer 主干，会先转为 FP32。
 
-`TrajectoryVocabularyDecoder` 使用一个线性层输出 `1 + K * D` 个通道。第 0 个通道作为 logit，不做激活；剩余通道 reshape 为 `[B, V, K, D]` 并经过 Tanh 得到残差。初始化时线性层所有权重为 0，logit bias 为 1，使初始 logit 全部输出 1；残差 bias 设置为 `atanh(residual_output_init_value)`，当前配置下 Tanh 后初始残差为 0。
+`TrajectoryVocabularyDecoder` 先对 `[B, V, hidden_dim]` 特征执行 `TokenRMSNorm`（`feature_norm`，沿最后一维计算 RMS，可学习 `weight` 初始为 1），再送入线性层输出 `1 + K * D` 个通道。第 0 个通道作为 logit，不做激活；剩余通道 reshape 为 `[B, V, K, D]` 并经过 Tanh 得到残差。初始化时线性层所有权重为 0，logit bias 为 1，使初始 logit 全部输出 1；残差 bias 设置为 `atanh(residual_output_init_value)`，当前配置下 Tanh 后初始残差为 0。由于线性层权重为零，初始输出仍只由 bias 决定，与新增 RMSNorm 前一致。
 
 ## 6. 配置项
 
@@ -120,6 +120,7 @@ $$
 | `decoder.logit_init_value` | `1.0` | logit 初始输出。 |
 | `decoder.residual_output_init_value` | `0.0` | Tanh 后残差初始输出。 |
 | `decoder.residual_activation` | `tanh` | 残差激活函数。 |
+| `decoder.rms_norm_eps` | `1e-6` | 解码前 TokenRMSNorm 数值稳定项。 |
 
 ## 7. 依赖关系
 
@@ -131,7 +132,7 @@ $$
 
 ## 8. 注意事项
 
-- 数值稳定性：高频编码、嵌入 MLP、解码线性头、Tanh 残差和 `.npz` 加载均使用 FP32；残差输出经 Tanh 限制到 `[-1, 1]`。
+- 数值稳定性：高频编码、嵌入 MLP、解码前 `TokenRMSNorm`、解码线性头、Tanh 残差和 `.npz` 加载均使用 FP32；`rms_norm_eps` 与 backbone 一致为 `1e-6`；残差输出经 Tanh 限制到 `[-1, 1]`。
 - 混合精度：即使外层 autocast 或父模型 `.to(dtype=torch.bfloat16)` 生效，本模块浮点参数、buffer 和输出仍保持 FP32。
 - 初始化：logit 初始输出为 1，不代表已经 Softmax 后的概率为 1；所有词表项 logit 相同，Softmax 后为均匀分布。
 - 配置：实现文件只读取配置，不重复定义配置文件已有默认值。
@@ -143,6 +144,7 @@ $$
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Cursor | AI 完成：轨迹解码器 `output_linear` 前新增 `TokenRMSNorm`（`feature_norm`）和 `rms_norm_eps` 配置。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：强制轨迹词表嵌入和解码组件在 FP32 下运行，避免外层 BF16 autocast 影响高频编码精度。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：将轨迹词表高频编码改为 $2\pi / 10^{i/64}$ 频带，并按 `[phi_y(y), phi_x(x)]` 拼接。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：改为复用公共 `model/swiglu.py` 中的 `SwiGLU` 激活。 |

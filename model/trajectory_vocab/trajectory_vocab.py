@@ -48,6 +48,7 @@ class TrajectoryVocabModelConfig:
         logit_init_value: 解码层 logit 初始输出值。
         residual_output_init_value: Tanh 后残差初始输出值。
         residual_activation: 残差激活函数名称，当前为 `tanh`。
+        rms_norm_eps: 解码前 TokenRMSNorm 的数值稳定项。
     """
 
     vocab_path: Path
@@ -66,6 +67,7 @@ class TrajectoryVocabModelConfig:
     logit_init_value: float
     residual_output_init_value: float
     residual_activation: str
+    rms_norm_eps: float
 
     def __post_init__(self) -> None:
         if self.num_trajectories <= 0:
@@ -101,6 +103,8 @@ class TrajectoryVocabModelConfig:
                 "residual_output_init_value 必须位于 (-1, 1)，"
                 f"实际为 {self.residual_output_init_value}。"
             )
+        if self.rms_norm_eps <= 0.0:
+            raise ValueError(f"rms_norm_eps 必须为正数，实际为 {self.rms_norm_eps}。")
         for field_name in ("physical_key", "symlog_key", "normalized_key", "scale_key"):
             value = getattr(self, field_name)
             if not value:
@@ -277,8 +281,29 @@ class TrajectoryVocabularyEmbedding(nn.Module):
         )
 
 
+class TokenRMSNorm(nn.Module):
+    """适用于 `[B, N, D]` Token 序列的 RMSNorm。"""
+
+    def __init__(self, hidden_dim: int, eps: float) -> None:
+        super().__init__()
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim 必须为正整数，实际为 {hidden_dim}。")
+        if eps <= 0.0:
+            raise ValueError(f"eps 必须为正数，实际为 {eps}。")
+        self.weight = nn.Parameter(torch.ones(hidden_dim))
+        self.eps = eps
+
+    def forward(self, token_features: torch.Tensor) -> torch.Tensor:
+        """沿最后一维执行 RMSNorm。"""
+
+        rms = token_features.pow(2).mean(dim=-1, keepdim=True).sqrt()
+        return self.weight * token_features / (rms + self.eps)
+
+
 class TrajectoryVocabularyDecoder(nn.Module):
     """从轨迹 token 特征解码轨迹词表 logit 和残差。
+
+    结构: RMSNorm -> Linear -> Tanh(residual)。
 
     Args:
         config: 模型侧轨迹词表配置。
@@ -293,6 +318,7 @@ class TrajectoryVocabularyDecoder(nn.Module):
     def __init__(self, config: TrajectoryVocabModelConfig) -> None:
         super().__init__()
         self.config = config
+        self.feature_norm = TokenRMSNorm(config.hidden_dim, config.rms_norm_eps)
         self.output_linear = nn.Linear(config.hidden_dim, 1 + config.residual_dim)
         self.residual_activation = nn.Tanh()
         self._reset_output_initialization()
@@ -328,7 +354,8 @@ class TrajectoryVocabularyDecoder(nn.Module):
 
         with _disabled_autocast(trajectory_features):
             trajectory_features_fp32 = trajectory_features.to(dtype=torch.float32)
-            decoded_features = self.output_linear(trajectory_features_fp32)
+            normalized_features = self.feature_norm(trajectory_features_fp32)
+            decoded_features = self.output_linear(normalized_features)
             logits = decoded_features[..., 0]
             residual_features = decoded_features[..., 1:].reshape(
                 trajectory_features.shape[0],
@@ -397,6 +424,7 @@ def load_trajectory_vocab_config(
         logit_init_value=_require_float(decoder_config, "logit_init_value"),
         residual_output_init_value=_require_float(decoder_config, "residual_output_init_value"),
         residual_activation=_require_string(decoder_config, "residual_activation"),
+        rms_norm_eps=_require_float(decoder_config, "rms_norm_eps"),
     )
 
 

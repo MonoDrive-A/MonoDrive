@@ -19,3 +19,4 @@ swiglu_hidden_dim = 768
 logit_init_value = 1.0
 residual_output_init_value = 0.0
 residual_activation = "tanh"
+rms_norm_eps = 1e-6

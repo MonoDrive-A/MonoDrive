@@ -12,7 +12,7 @@
 | `TrajectoryVocabData` | dataclass | 保存加载后的物理词表、Symlog 词表、归一化词表和缩放系数。 |
 | `TrajectoryDecoderOutput` | NamedTuple | 保存 `logits` 和 `residuals`。 |
 | `TrajectoryVocabularyEmbedding` | class | 将 `trajectory_vocab_normalized` 编码为 384 维轨迹查询。 |
-| `TrajectoryVocabularyDecoder` | class | 单层线性层输出 logit 和 Tanh 残差。 |
+| `TrajectoryVocabularyDecoder` | class | TokenRMSNorm + 线性层输出 logit 和 Tanh 残差。 |
 | `load_trajectory_vocab_config` | function | 读取 `config/trajectory_vocab.toml`。 |
 | `load_trajectory_vocabulary` | function | 加载并校验 `.npz` 词表。 |
 
@@ -34,7 +34,7 @@
 | `load_trajectory_vocab_config(config_path)` | `config_path` 指向 TOML 文件；词表路径必须是项目内相对路径。 |
 | `load_trajectory_vocabulary(config)` | `.npz` 必须包含配置指定字段，三个词表字段 shape 必须为 `[256, 6, 2]`。 |
 | `TrajectoryVocabularyEmbedding(config, vocabulary)` | 嵌入层只使用 `vocabulary.trajectory_vocab_normalized`；最后一维按 ego `[x, y]` 解释，输出 FP32 `[256, 384]`。 |
-| `TrajectoryVocabularyDecoder(config)` | 输入必须为 `[B, 256, 384]`；内部转为 FP32，logits 不做激活，residuals 经过 Tanh。 |
+| `TrajectoryVocabularyDecoder(config)` | 输入必须为 `[B, 256, 384]`；内部转为 FP32，先经 `TokenRMSNorm`，logits 不做激活，residuals 经过 Tanh。 |
 
 ## 5. 最小使用示例
 
@@ -70,6 +70,7 @@ output = decoder(trajectory_queries.unsqueeze(0))
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Cursor | AI 完成：同步轨迹解码器解码前 TokenRMSNorm 摘要。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：同步轨迹词表嵌入和解码组件强制 FP32 的混合精度约束。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：同步轨迹词表高频编码公式和 y/x 拼接顺序。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：记录轨迹词表嵌入层改为复用公共 SwiGLU。 |

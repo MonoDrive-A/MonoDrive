@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | `[vocabulary]` | TOML table | 指定词表路径、字段名和 `[256, 6, 2]` shape。 |
 | `[embedding]` | TOML table | 指定高频编码、SwiGLU 嵌入层和 `hidden_dim=384`。 |
-| `[decoder]` | TOML table | 指定 logit 初始输出 1、残差经 Tanh 后初始输出 0。 |
+| `[decoder]` | TOML table | 指定解码前 RMSNorm eps、logit 初始输出 1、残差经 Tanh 后初始输出 0。 |
 
 ## 3. 输入输出 Shape 概览
 
@@ -29,7 +29,7 @@
 | --- | --- |
 | `[vocabulary]` | `path` 必须是项目内相对路径；模型嵌入层只使用 `normalized_key` 指向的字段。 |
 | `[embedding]` | `hidden_dim` 同时约束轨迹查询和解码输入维度；高频编码默认使用 `frequency_base=10.0` 和 `frequency_scale=2π`。 |
-| `[decoder]` | `residual_output_init_value` 必须在 `(-1, 1)` 内，当前 `residual_activation` 仅支持 `tanh`。 |
+| `[decoder]` | `rms_norm_eps` 必须为正数；`residual_output_init_value` 必须在 `(-1, 1)` 内，当前 `residual_activation` 仅支持 `tanh`。 |
 
 ## 5. 最小使用示例
 
@@ -53,5 +53,6 @@ vocabulary = load_trajectory_vocabulary(config)
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Cursor | AI 完成：同步 `decoder.rms_norm_eps` 配置摘要。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：同步高频编码配置公式和默认值。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：新增模型侧轨迹词表配置摘要。 |

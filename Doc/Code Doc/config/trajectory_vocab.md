@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `[vocabulary]` | TOML table | 词表路径、字段名和 shape 约束。 |
 | `[embedding]` | TOML table | 高频编码、SwiGLU 嵌入层和输出特征维度。 |
-| `[decoder]` | TOML table | 解码层 logit 和残差初始输出口径。 |
+| `[decoder]` | TOML table | 解码前 RMSNorm、logit 和残差初始输出口径。 |
 
 ## 3. 关键类和函数
 
@@ -34,11 +34,11 @@
 
 ### `[decoder]`
 
-- 功能：控制轨迹解码层的初始输出行为。
+- 功能：控制轨迹解码前 RMSNorm 和解码层初始输出行为。
 - 输入：`[B, 256, 384]` 轨迹 token 特征。
 - 输出：logits `[B, 256]` 和残差 `[B, 256, 6, 2]`。
-- Shape：单层线性层输出 `1 + 6 * 2 = 13` 个通道。
-- 关键参数：`logit_init_value`、`residual_output_init_value`、`residual_activation`。
+- Shape：`TokenRMSNorm` 保持 `[B, 256, 384]`，线性层输出 `1 + 6 * 2 = 13` 个通道。
+- 关键参数：`rms_norm_eps`、`logit_init_value`、`residual_output_init_value`、`residual_activation`。
 
 ## 4. 输入输出与 Shape
 
@@ -53,7 +53,7 @@
 
 ## 5. 关键实现逻辑
 
-配置文件分为三个表。`[vocabulary]` 固定模型侧使用的 `.npz` 字段，嵌入层只读取 `normalized_key` 指向的已归一化字段。`[embedding]` 决定高频编码和两层线性嵌入结构；当前频带由 `frequency_scale / frequency_base ** (i / frequency_count)` 生成，对应 $2\pi / 10^{i/64}$。`[decoder]` 决定单层线性解码头的初始化：logit 通道权重为 0、bias 为 `logit_init_value`；残差通道权重为 0、bias 反解为 Tanh 前值，使 Tanh 后初始输出等于 `residual_output_init_value`。
+配置文件分为三个表。`[vocabulary]` 固定模型侧使用的 `.npz` 字段，嵌入层只读取 `normalized_key` 指向的已归一化字段。`[embedding]` 决定高频编码和两层线性嵌入结构；当前频带由 `frequency_scale / frequency_base ** (i / frequency_count)` 生成，对应 $2\pi / 10^{i/64}$。`[decoder]` 决定解码前 `TokenRMSNorm` 的 `rms_norm_eps`，以及线性解码头的初始化：logit 通道权重为 0、bias 为 `logit_init_value`；残差通道权重为 0、bias 反解为 Tanh 前值，使 Tanh 后初始输出等于 `residual_output_init_value`。
 
 相对路径按项目根目录解析。配置文件不得写入本机绝对路径，避免不同机器和运行目录之间出现不可复现实验。
 
@@ -77,6 +77,7 @@
 | `decoder.logit_init_value` | `1.0` | 解码层 logit 初始输出值。 |
 | `decoder.residual_output_init_value` | `0.0` | Tanh 后残差初始输出值。 |
 | `decoder.residual_activation` | `tanh` | 残差激活函数。 |
+| `decoder.rms_norm_eps` | `1e-6` | 解码前 TokenRMSNorm 数值稳定项。 |
 
 ## 7. 依赖关系
 
@@ -95,5 +96,6 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Cursor | AI 完成：新增 `decoder.rms_norm_eps` 配置项。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：同步轨迹词表高频编码配置为 $2\pi / 10^{i/64}$ 形式。 |
 | 2026-06-06 | 1os3_Codex | AI 完成：新增模型侧轨迹词表加载、嵌入和解码配置。 |
