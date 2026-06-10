@@ -193,37 +193,22 @@ def dump_openloop_snapshot(
     v_kmh: float,
     goal_d_m: float,
     goal_refreshed: bool,
+    scene_name: str = "carla_closed_loop",
+    goal_min_dist_m: float = 24.0,
+    goal_max_dist_m: float = 30.0,
 ) -> Path:
-    """落盘一个 ``.pt`` snapshot，便于与开环 H5 样本字段对照。"""
+    """落盘单样本 ``b2d_h5_v5`` H5，可直接用于开环 ``backbone_feature_pca_viewer``。"""
+    from .h5_export import dump_openloop_h5_snapshot
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    frames_past_cpu = frames_past.detach().cpu().float().contiguous()
-    if frames_past_cpu.ndim == 4 and int(frames_past_cpu.shape[1]) == 3:
-        _, _, height, width = frames_past_cpu.shape
-    else:
-        _, _, height, width = frames_past_cpu.shape
-
-    motion_cpu = ego_motion.detach().cpu().float().contiguous()
-    target_cpu = target_point.detach().cpu().float().contiguous()
-    if motion_cpu.shape != (3,):
-        raise ValueError(f"ego_motion 形状应为 (3,)，实际 {tuple(motion_cpu.shape)}")
-    if target_cpu.shape != (2,):
-        raise ValueError(f"target_point 形状应为 (2,)，实际 {tuple(target_cpu.shape)}")
-
-    payload = {
-        "images": frames_past_cpu,
-        "ego_motion": motion_cpu,
-        "target_point": target_cpu,
-        "future_trajectory": torch.zeros(6, 2, dtype=torch.float32),
-        "tick": int(tick),
-        "v_kmh": float(v_kmh),
-        "goal_d_m": float(goal_d_m),
-        "goal_refreshed": bool(goal_refreshed),
-        "source": "carla_closed_loop",
-        "image_hw": (int(height), int(width)),
-    }
-    pt_path = out_dir / f"snapshot_tick{tick:05d}.pt"
-    torch.save(payload, pt_path)
-    logger.info("dumped open-loop-compatible snapshot %s", pt_path)
-    return pt_path
+    return dump_openloop_h5_snapshot(
+        out_dir=out_dir,
+        tick=tick,
+        frames_past=frames_past,
+        ego_motion=ego_motion,
+        target_point=target_point,
+        scene_name=scene_name,
+        goal_min_dist_m=goal_min_dist_m,
+        goal_max_dist_m=goal_max_dist_m,
+    )

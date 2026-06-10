@@ -97,6 +97,10 @@
 
 输出路径通过项目根目录校验，默认写入 `visualization/outputs/backbone_feature_pca/`。主诊断图保存后，默认还会额外写入 `{scene}_detection_bev_{sample_index}.png`，其中按 query 索引绘制 Agent/Map 检测；`p(none) > --detection-bev-none-threshold` 的 query 会被截断不展示。argmax 为 `none` 且未被截断的 Agent 以灰色虚线框显示，Map 以灰色折线显示。
 
+`--mask-vision-embeddings` 会在每层 `BackboneTransformerBlock` 前后通过 forward hook 持续清零 `slice(vision.start, register.stop)` 对应的 visual_related token，使驾驶相关 token 无法读取图像特征；RGB 历史帧仍显示真实图像。掩码模式下默认输出文件名追加 `_vision_masked` 后缀。对比 baseline 与 masked 的 model outputs BEV 和轨迹词表概率面板，可判断模型是否主要依赖 target_point、ego_motion 和词表先验。
+
+`--target-x` 与 `--target-y` 可成对覆写前向目标点，单位 ego 米制，坐标系与 H5 样本一致。`--zero-speed` 会把 `ego_motion` 的线速度 `Vx/Vy` 强制置 0，并保留角速度 `W`；覆写后的目标点和自车运动会同步用于 BEV 绘制与 metadata 面板展示。
+
 ## 6. 配置项
 
 | 配置项 | 默认值 | 说明 |
@@ -116,6 +120,9 @@
 | `--detection-bev-output` | 可选 | 额外保存全部检测 query BEV 的 PNG 路径，必须位于项目内。 |
 | `--no-detection-bev` | `False` | 设为 `True` 时不额外保存全部检测 query BEV PNG。 |
 | `--detection-bev-none-threshold` | `1.0` | 额外检测 BEV 的 none 截断阈值；`p(none)` 超过该值的 query 不绘制。 |
+| `--mask-vision-embeddings` | `False` | 逐层清零 vision + register token；默认输出追加 `_vision_masked` 后缀。 |
+| `--target-x` / `--target-y` | 无 | 成对覆写前向目标点，单位 ego 米制。 |
+| `--zero-speed` | `False` | 将 `ego_motion` 的 `Vx/Vy` 强制置 0，保留 `W`。 |
 
 ## 7. 依赖关系
 
@@ -140,6 +147,8 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Composer | AI 完成：新增 `--target-x`/`--target-y` 与 `--zero-speed`，支持覆写前向目标点并强制线速度置零。 |
+| 2026-06-10 | 1os3_Composer | AI 完成：新增 `--mask-vision-embeddings`，通过逐层 hook 清零 vision + register token 并追加 `_vision_masked` 输出后缀。 |
 | 2026-06-10 | 1os3_Composer | AI 完成：额外检测 BEV 支持 `--detection-bev-none-threshold` none 截断，并记录 `map_none_scores`。 |
 | 2026-06-10 | 1os3_Composer | AI 完成：默认额外保存全部 Agent/Map 检测 query 的独立 BEV PNG，并暴露 `--detection-bev-output` 与 `--no-detection-bev`。 |
 | 2026-06-09 | 1os3_Composer | AI 完成：已绘制 Agent 标签同时显示 argmax 类别概率和 `none` 概率。 |

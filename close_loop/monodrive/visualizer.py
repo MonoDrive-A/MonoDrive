@@ -8,7 +8,7 @@
   坐标，**直接在录制帧上用 cv2 画线**。模型 buffer 拿到的是原始干净图像，MP4 录像里
   才看得到叠加的轨迹。
 - ``Mp4Recorder``：把前视摄像头的 BGRA 数据写成 ``mp4v`` 编码的 MP4 文件
-  （fps=8，分辨率 = 摄像头分辨率，默认 1600×900）。**完全不依赖屏幕窗口**，
+  （fps=5，分辨率 = 摄像头分辨率，默认 1600×900）。**完全不依赖屏幕窗口**，
   与 Carla server 的 ``-RenderOffScreen`` 离屏模式兼容。
 """
 
@@ -25,6 +25,8 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
 import carla
+
+from .inputs import DEFAULT_SIM_DT, DEFAULT_SIM_FPS
 
 logger = logging.getLogger("monodrive_viz")
 
@@ -175,7 +177,7 @@ class WorldDebugDrawer:
     ``2 * dt``，让线段在一个 tick 内既能完整显示也不会跨帧残留太久。
     """
 
-    def __init__(self, world: carla.World, dt: float = 0.125) -> None:
+    def __init__(self, world: carla.World, dt: float = DEFAULT_SIM_DT) -> None:
         self.world = world
         self.debug = world.debug
         self.dt = float(dt)
@@ -290,14 +292,14 @@ class BackgroundDebugDrawer:
 
     使用::
 
-        drawer = BackgroundDebugDrawer(world, dt=0.125)
+        drawer = BackgroundDebugDrawer(world, dt=DEFAULT_SIM_DT)
         drawer.start()
         drawer.submit(DrawPayload(...))
         ...
         drawer.close()
     """
 
-    def __init__(self, world: carla.World, dt: float = 0.125) -> None:
+    def __init__(self, world: carla.World, dt: float = DEFAULT_SIM_DT) -> None:
         self._impl = WorldDebugDrawer(world, dt=dt)
         self._queue: "queue.Queue[Optional[DrawPayload]]" = queue.Queue(maxsize=1)
         self._thread: Optional[threading.Thread] = None
@@ -419,7 +421,7 @@ class Mp4Recorder:
 
     用法::
 
-        rec = Mp4Recorder("out.mp4", fps=8, size=(1600, 900))
+        rec = Mp4Recorder("out.mp4", fps=int(round(DEFAULT_SIM_FPS)), size=(1600, 900))
         rec.open()
         rec.write_bgra(bgra_uint8)         # 直接传 carla.Image.raw_data 的 numpy view
         ...

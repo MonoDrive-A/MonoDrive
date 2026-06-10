@@ -9,7 +9,7 @@
 - **控制**：
     * 横向：在 winner 折线或 committed 世界系路径上 pure-pursuit + PIDLateralController。
     * 纵向：对 winner ``(x,y)`` 折线按 ``TRAJECTORY_DT=0.5s`` 差分得 v/a，再经 PID / 前馈。
-- **冷启动**：前 ``PAST_FRAMES - 1`` 个 tick buffer 没填满，跑 BehaviorAgent fallback。
+- **冷启动**：ring buffer 未攒够 5Hz 重采样所需 tick 前，跑 BehaviorAgent fallback。
 """
 
 from __future__ import annotations
@@ -42,13 +42,16 @@ from model.backbone import MonoDriveBackbone, load_backbone_config  # noqa: E402
 from train.checkpointing import load_checkpoint  # noqa: E402
 
 from .inputs import (  # noqa: E402
+    DEFAULT_SIM_DT,
     PAST_FRAMES,
     TRAJECTORY_DT,
     EgoBuffer,
     FrameBuffer,
     build_ego_motion,
     build_target_point,
+    effective_yaw,
     ego_local_to_world,
+    required_buffer_capacity,
 )
 from .model_inference import decode_trajectories, decode_winner_trajectory  # noqa: E402
 from .planner_goal import DenseRoute, GOAL_MAX_DIST_M, GOAL_MIN_DIST_M  # noqa: E402
@@ -167,9 +170,7 @@ def sample_traj_diff_kinematics(
 ) -> Tuple[float, float]:
     """从轨迹折线逐帧差分估计 ``(speed_m_s, accel_m_s2)``。
 
-    模型输出 ``(x, y)`` 序列与仿真同频（默认 ``dt=0.125`` s / 8 FPS），相邻点位移
-    / ``dt`` 为段速度，段速度差分 / ``dt`` 为段加速度。比直接读 head 的 ``vel/accel``
-    标量更贴合「几何轨迹即控制参考」的语义。
+    模型输出 ``(x, y)`` 序列按 2Hz 未来点间隔 ``TRAJECTORY_DT=0.5s`` 差分；仿真 tick 默认 5Hz。
 
     Args:
         xy: ``(T, 2)`` ego-local 或 world 系折线。
@@ -272,7 +273,7 @@ class MonoDriveAgent:
         camera_width: int = 800,
         camera_height: int = 450,
         device: str = "cuda",
-        dt: float = 0.125,
+        dt: float = DEFAULT_SIM_DT,
         look_ahead_step: int = 2,                # 旧参数，仅在 use_pure_pursuit=False 时生效
         look_ahead_min_dist: float = 4.0,        # pure-pursuit 最小预瞄距离 (m)
         look_ahead_time: float = 0.8,            # pure-pursuit 时间预瞄 (s)
@@ -299,6 +300,8 @@ class MonoDriveAgent:
         use_residual: bool = True,
         diagnostic_dir: Optional[str] = None,
         diagnostic_every: int = 1,
+        export_h5_path: Optional[str] = None,
+        scene_name: str = "carla_closed_loop",
     ) -> None:
         """
         Args:
@@ -310,7 +313,7 @@ class MonoDriveAgent:
             camera_width: Carla RGB 相机宽度（像素），默认 800
             camera_height: Carla RGB 相机高度（像素），默认 450
             device: 推理设备 "cuda" / "cpu"
-            dt: Carla tick 周期（秒），8 FPS = 0.125s
+            dt: Carla tick 周期（秒），默认 5 FPS = 0.2s，与 B2D model_fps 一致
             look_ahead_step: 用 winner 物理轨迹的第几步做横向 PID 目标（默认 step=2，约 0.25s 后）
             long_mode: 纵向控制模式，四选一::
 
@@ -353,8 +356,11 @@ class MonoDriveAgent:
                              hold > 1 时 ego 逼近目标后可能落入 OOD。
             use_residual: 解码时是否叠加 Tanh 残差修正；``False`` 时仅用词表 Symlog 轨迹
                          （CLI ``--no-residual``）。
-            diagnostic_dir: 若指定，则每次 re-plan 把输入与 top-k 轨迹 dump 成 PNG + NPZ。
+            diagnostic_dir: 若指定，则每次 re-plan 把输入与 top-k 轨迹 dump 成 PNG + NPZ，
+                            并额外写出单样本 ``b2d_h5_v5`` H5。
             diagnostic_every: 每隔 N 次 re-plan 才 dump 一次（默认 1 = 每次都 dump）。
+            export_h5_path: 若指定，则在运行期间累积样本，结束时写出与开环兼容的会话级 H5。
+            scene_name: 导出 H5 的 ``scene_name`` 元数据。
         """
         if long_mode not in self.LONG_MODES:
             raise ValueError(f"long_mode={long_mode!r} 不在 {self.LONG_MODES}")
@@ -433,6 +439,20 @@ class MonoDriveAgent:
         self.use_residual = bool(use_residual)
         self.diagnostic_dir = Path(diagnostic_dir).expanduser().resolve() if diagnostic_dir else None
         self.diagnostic_every = max(1, int(diagnostic_every))
+        self.scene_name = str(scene_name)
+        self._h5_exporter = None
+        if export_h5_path:
+            from .h5_export import ClosedLoopH5Exporter
+
+            resolved_export_h5 = Path(export_h5_path).expanduser().resolve()
+            resolved_export_h5.parent.mkdir(parents=True, exist_ok=True)
+            self._h5_exporter = ClosedLoopH5Exporter(
+                output_path=resolved_export_h5,
+                scene_name=self.scene_name,
+                goal_min_dist_m=self.goal_min_dist_m,
+                goal_max_dist_m=self.goal_max_dist_m,
+            )
+            logger.info("开环兼容 H5 导出启用 → %s", resolved_export_h5)
         self.viz_top_k = max(1, int(viz_top_k))
         self.camera_width = int(camera_width)
         self.camera_height = int(camera_height)
@@ -461,13 +481,15 @@ class MonoDriveAgent:
 
         self.model = self._load_model(checkpoint)
 
-        # buffers
+        # buffers：5Hz 下每 tick 一帧，容量 = PAST_FRAMES（8）
+        _buf_cap = required_buffer_capacity(self.dt)
         self.frame_buf = FrameBuffer(
-            maxlen=PAST_FRAMES,
+            maxlen=_buf_cap,
             source_hw=(self.camera_height, self.camera_width),
+            sim_dt=self.dt,
         )
-        self.ego_buf = EgoBuffer(maxlen=PAST_FRAMES)
-        self.ego_buf.set_dt(self.dt)
+        self.ego_buf = EgoBuffer(maxlen=_buf_cap, sim_dt=self.dt)
+
 
         # PID 控制器
         # PID 系数沿用 BehaviorAgent 默认值（参考 local_planner.py）。
@@ -546,6 +568,12 @@ class MonoDriveAgent:
     def set_current_tick(self, tick: int) -> None:
         """主循环每 tick 调用一次，仅用于诊断 dump 的文件名 / 日志关联。"""
         self._current_tick = int(tick)
+
+    def finalize_h5_export(self) -> Optional[Path]:
+        """写出会话级开环兼容 H5；未启用 ``export_h5_path`` 时返回 ``None``。"""
+        if self._h5_exporter is None:
+            return None
+        return self._h5_exporter.finalize()
 
     # ─────────────────────────────────────────────────────────────
     @torch.no_grad()
@@ -704,15 +732,11 @@ class MonoDriveAgent:
                 self.goal_min_dist_m, self.goal_max_dist_m, goal_refreshed,
             )
 
-        ego_motion = build_ego_motion(self.ego_buf)
-        target_point = build_target_point(self.ego_buf, goal_world_xy)
+        ego_motion = build_ego_motion(self.ego_buf, flip_y=self.flip_y)
+        target_point = build_target_point(
+            self.ego_buf, goal_world_xy, flip_y=self.flip_y,
+        )
         goal_dist_m = float(torch.linalg.norm(target_point).item())
-        if self.flip_y:
-            ego_motion = ego_motion.clone()
-            ego_motion[1] *= -1.0
-            ego_motion[2] *= -1.0
-            target_point = target_point.clone()
-            target_point[1] *= -1.0
 
         frames_past = self.frame_buf.stack()
         ego_motion_t = ego_motion.unsqueeze(0).to(self.device, non_blocking=True)
@@ -741,13 +765,8 @@ class MonoDriveAgent:
             winner_traj_phys = decode.winner_traj_phys
 
         top_trajs_phys = decode.top_trajs_phys.copy()
-        if self.flip_y:
-            winner_traj_phys = winner_traj_phys.copy()
-            winner_traj_phys[..., 1] *= -1.0
-            top_trajs_phys = top_trajs_phys.copy()
-            top_trajs_phys[..., 1] *= -1.0
 
-        yaw_ref = float(latest.yaw)
+        yaw_ref = effective_yaw(float(latest.yaw), self.flip_y)
         z_ref = float(ego_loc.z)
 
         n_top, t_horizon, _ = top_trajs_phys.shape
@@ -755,40 +774,54 @@ class MonoDriveAgent:
         for k in range(n_top):
             all_world[k] = ego_local_to_world(top_trajs_phys[k, :, :2], yaw_ref, p_ref)
 
-        if self.diagnostic_dir is not None and self._infer_counter % self.diagnostic_every == 0:
+        should_dump_snapshot = (
+            self.diagnostic_dir is not None or self._h5_exporter is not None
+        ) and self._infer_counter % self.diagnostic_every == 0
+        if should_dump_snapshot:
             try:
-                from .diagnostic import dump_openloop_snapshot, dump_replan_snapshot
-
                 v_kmh = math.hypot(latest.vx, latest.vy) * 3.6
-                dump_replan_snapshot(
-                    out_dir=self.diagnostic_dir,
-                    tick=self._current_tick,
-                    frames_past=frames_past,
-                    ego_motion=ego_motion,
-                    target_point=target_point,
-                    trajs_phys=top_trajs_phys,
-                    probs=decode.top_probs,
-                    winner_idx=winner_idx,
-                    goal_local_xy=target_point.cpu().numpy().astype(np.float64),
-                    v_kmh=v_kmh,
-                    goal_d_m=goal_dist_m,
-                    goal_refreshed=goal_refreshed,
-                    extra_text=(
-                        f"flip_y={self.flip_y} | precision={self.precision}"
-                        f" | viz_top_k={self.viz_top_k}"
-                        f" | use_residual={self.use_residual}"
-                    ),
-                )
-                dump_openloop_snapshot(
-                    out_dir=self.diagnostic_dir,
-                    tick=self._current_tick,
-                    frames_past=frames_past,
-                    ego_motion=ego_motion,
-                    target_point=target_point,
-                    v_kmh=v_kmh,
-                    goal_d_m=goal_dist_m,
-                    goal_refreshed=goal_refreshed,
-                )
+                if self.diagnostic_dir is not None:
+                    from .diagnostic import dump_openloop_snapshot, dump_replan_snapshot
+
+                    dump_replan_snapshot(
+                        out_dir=self.diagnostic_dir,
+                        tick=self._current_tick,
+                        frames_past=frames_past,
+                        ego_motion=ego_motion,
+                        target_point=target_point,
+                        trajs_phys=top_trajs_phys,
+                        probs=decode.top_probs,
+                        winner_idx=winner_idx,
+                        goal_local_xy=target_point.cpu().numpy().astype(np.float64),
+                        v_kmh=v_kmh,
+                        goal_d_m=goal_dist_m,
+                        goal_refreshed=goal_refreshed,
+                        extra_text=(
+                            f"flip_y={self.flip_y} | precision={self.precision}"
+                            f" | viz_top_k={self.viz_top_k}"
+                            f" | use_residual={self.use_residual}"
+                        ),
+                    )
+                    dump_openloop_snapshot(
+                        out_dir=self.diagnostic_dir,
+                        tick=self._current_tick,
+                        frames_past=frames_past,
+                        ego_motion=ego_motion,
+                        target_point=target_point,
+                        v_kmh=v_kmh,
+                        goal_d_m=goal_dist_m,
+                        goal_refreshed=goal_refreshed,
+                        scene_name=self.scene_name,
+                        goal_min_dist_m=self.goal_min_dist_m,
+                        goal_max_dist_m=self.goal_max_dist_m,
+                    )
+                if self._h5_exporter is not None:
+                    self._h5_exporter.append_sample(
+                        tick=self._current_tick,
+                        frames_past=frames_past,
+                        ego_motion=ego_motion,
+                        target_point=target_point,
+                    )
             except Exception:        # noqa: BLE001
                 logger.exception("诊断 dump 失败（不致命）")
         self._infer_counter += 1
@@ -1031,7 +1064,7 @@ class MonoDriveAgent:
 
     # ─────────────────────────────────────────────────────────────
     def _run_fallback(self) -> carla.VehicleControl:
-        """前 ``PAST_FRAMES - 1`` 个 tick：buffer 未满 → BehaviorAgent 控制。
+        """ring buffer 未攒够 5Hz 重采样所需 tick → BehaviorAgent 控制。
 
         BehaviorAgent 自身只接受 sync world.tick() 后调一次 ``run_step()``。
         我们也帮它做 ``_update_information``（BehaviorAgent 自带）。

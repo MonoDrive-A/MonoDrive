@@ -24,8 +24,8 @@ Carla Town10HD（或可配置地图）闭环评测脚本：world 同步设置、
 
 | 参数 | 默认 |
 | --- | --- |
-| `fixed_dt` | 0.125 s (8 FPS) |
-| `n-ticks` | 960 |
+| `fixed_dt` | 0.2 s (5 FPS，与 B2D model_fps 对齐) |
+| `n-ticks` | 600（约 2 分钟 @ 5 FPS） |
 | `replan-every` | 4 |
 | `goal-min-dist-m` | 24.0 |
 | `goal-max-dist-m` | 30.0 |
@@ -41,4 +41,6 @@ Carla Town10HD（或可配置地图）闭环评测脚本：world 同步设置、
 
 | 日期 | 修改人 | 说明 |
 | --- | --- | --- |
+| 2026-06-10 | FuZiR_Cursor | 仿真 tick 改为 5Hz（`fixed_delta_seconds=0.2`）。 |
+
 | 2026-06-09 | FuZiR_Cursor | 模块路径改为 `close_loop.monodrive.run_closed_loop`。 |

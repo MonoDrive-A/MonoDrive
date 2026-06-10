@@ -4,7 +4,7 @@
 用法（推荐）::
 
     # 服务器端先离屏启动：
-    #   ./CarlaUE4.sh -RenderOffScreen -nosound -fps=8 -windowed -ResX=1 -ResY=1
+    #   ./CarlaUE4.sh -RenderOffScreen -nosound -fps=5 -windowed -ResX=1 -ResY=1
     # 再运行本脚本：
     python -m close_loop.monodrive.run_closed_loop \\
         --host 127.0.0.1 --port 2000 \\
@@ -38,6 +38,7 @@ from .camera_config import (
     B2D_CAM2EGO_XYZ,
     pinhole_intrinsics,
 )
+from .inputs import DEFAULT_SIM_DT, DEFAULT_SIM_FPS
 
 # 由 ``_load_carla()`` 在 ``main()`` 内注入；帮助函数运行前必须已加载。
 carla: Any = None
@@ -175,12 +176,19 @@ def parse_args() -> argparse.Namespace:
         "--diagnostic-dir", type=str, default=None,
         help=(
             "诊断 dump 目录。开启后，每次模型推理把 frames / ego_motion / target_point / "
-            "top-k 轨迹落盘为 PNG（+ NPZ）。"
+            "top-k 轨迹落盘为 PNG（+ NPZ），并额外写出单样本 b2d_h5_v5 H5。"
         ),
     )
     p.add_argument(
         "--diagnostic-every", type=int, default=1,
         help="每隔 N 次推理 dump 一张（默认 1）。",
+    )
+    p.add_argument(
+        "--export-h5", type=str, default=None,
+        help=(
+            "会话级开环兼容 H5 输出路径（b2d_h5_v5）。"
+            "运行结束后可直接用于 visualization/backbone_feature_pca_viewer.py --h5。"
+        ),
     )
 
     p.add_argument("--n-traffic", type=int, default=50,
@@ -188,8 +196,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sampling-resolution", type=float, default=0.5,
                    help="GlobalRoutePlanner 密集采样间距 (m)")
 
-    p.add_argument("--n-ticks", type=int, default=8 * 120,
-                   help="主循环最大 tick 数（默认 ~2 分钟 @ 8 FPS）")
+    p.add_argument("--n-ticks", type=int, default=int(DEFAULT_SIM_FPS * 120),
+                   help=f"主循环最大 tick 数（默认 ~2 分钟 @ {DEFAULT_SIM_FPS:.0f} FPS）")
     p.add_argument("--mp4", default=None,
                    help="MP4 输出路径；不传则不录制视频。")
 
@@ -236,8 +244,11 @@ def parse_args() -> argparse.Namespace:
     # ── 坐标系翻转（训练数据 vs Carla y 轴方向） ──
     p.add_argument(
         "--flip-y", action="store_true",
-        help="翻转 y 轴（含 heading/vy/yaw_rate/goal_dy 与模型输出 traj_y）；"
-        "训练数据为右手系（y 向左）、Carla 为左手系（y 向右）时需要打开",
+        help=(
+            "将 Carla 坐标对齐到 B2D ego 约定（y 左向）：对 ego-local 变换取反 yaw，"
+            "并同步修正 ego_motion 的 (vx,vy,w) 与 target_point；模型不接收 yaw，"
+            "仅接收 ego_motion[3]。轨迹 world 投影同样使用取反后的 yaw。"
+        ),
     )
 
     # ── 轨迹跟踪模式 ──
@@ -290,7 +301,7 @@ def parse_args() -> argparse.Namespace:
 # ─────────────────────────────────────────────────────────────
 # Carla 帮助函数
 # ─────────────────────────────────────────────────────────────
-def configure_world_sync(world: carla.World, fixed_dt: float = 0.125) -> carla.WorldSettings:
+def configure_world_sync(world: carla.World, fixed_dt: float = DEFAULT_SIM_DT) -> carla.WorldSettings:
     """切换到严格同步模式 + 离线渲染兼容。返回旧 settings 以便恢复。"""
     old = world.get_settings()
     new = carla.WorldSettings(
@@ -675,7 +686,14 @@ def main() -> int:
     tm.global_percentage_speed_difference(0.0)
 
     # World sync mode（必须在 TM sync 之后）
-    old_settings = configure_world_sync(world, fixed_dt=0.125)
+    old_settings = configure_world_sync(world, fixed_dt=DEFAULT_SIM_DT)
+    sim_dt = DEFAULT_SIM_DT
+    sim_fps = DEFAULT_SIM_FPS
+    log_interval_ticks = max(1, int(round(1.0 / sim_dt)))
+    logger.info(
+        "World 同步模式: fixed_delta_seconds=%.3f s (%.0f Hz)，与 B2D model_fps 对齐",
+        sim_dt, sim_fps,
+    )
 
     ego_vehicle: Optional[carla.Vehicle] = None
     camera: Optional[carla.Sensor] = None
@@ -727,6 +745,8 @@ def main() -> int:
             n_tl = set_all_traffic_lights_green(world, freeze=True)
             logger.info("已强制 %d 个红绿灯为绿灯（--all-lights-green）", n_tl)
 
+        export_scene_name = f"CarlaClosedLoop_{args.town}"
+
         # ── Agent ──
         agent = MonoDriveAgent(
             vehicle=ego_vehicle,
@@ -737,7 +757,7 @@ def main() -> int:
             camera_width=camera_width,
             camera_height=camera_height,
             device=args.device,
-            dt=0.125,
+            dt=sim_dt,
             long_mode=args.long_mode,
             accel_throttle_scale=args.accel_throttle_scale,
             accel_brake_scale=args.accel_brake_scale,
@@ -760,6 +780,8 @@ def main() -> int:
             use_residual=not args.no_residual,
             diagnostic_dir=args.diagnostic_dir,
             diagnostic_every=args.diagnostic_every,
+            export_h5_path=args.export_h5,
+            scene_name=export_scene_name,
         )
         if args.no_residual:
             logger.info("轨迹解码: 仅词表（--no-residual，不叠加 Tanh 残差）")
@@ -768,7 +790,7 @@ def main() -> int:
             args.goal_min_dist_m,
             args.goal_max_dist_m,
             args.goal_hold_ticks,
-            args.goal_hold_ticks * 0.125,
+            args.goal_hold_ticks * sim_dt,
         )
         if args.force_winner_idx is not None:
             logger.info("已强制 winner_idx=%d（忽略 probs.argmax）", args.force_winner_idx)
@@ -781,7 +803,7 @@ def main() -> int:
             logger.info(
                 "轨迹跟踪: committed | replan_every=%d tick (%.1f Hz) | long_mode=%s",
                 args.replan_every,
-                8.0 / max(args.replan_every, 1),
+                sim_fps / max(args.replan_every, 1),
                 args.long_mode,
             )
         logger.info(
@@ -795,7 +817,7 @@ def main() -> int:
         # ── 可视化 ──
         # 关键: world.debug.draw_* 会被摄像头拍到 → 模型也会看见 → 默认关闭。
         enable_world_debug = (not args.no_viz) and args.world_debug
-        drawer = BackgroundDebugDrawer(world, dt=0.125) if enable_world_debug else None
+        drawer = BackgroundDebugDrawer(world, dt=sim_dt) if enable_world_debug else None
         if drawer is not None:
             drawer.start()
             logger.warning(
@@ -811,7 +833,7 @@ def main() -> int:
 
         if args.mp4:
             recorder = Mp4Recorder(
-                args.mp4, fps=8, size=(camera_width, camera_height), fourcc="mp4v",
+                args.mp4, fps=int(round(sim_fps)), size=(camera_width, camera_height), fourcc="mp4v",
             )
             recorder.open()
             if do_mp4_overlay:
@@ -845,7 +867,7 @@ def main() -> int:
             tt_tick += time.perf_counter() - _t0
 
             # 仿真会周期性地把灯组切回红/黄，定期重新刷成绿灯
-            if args.all_lights_green and tick_i % 8 == 0:
+            if args.all_lights_green and tick_i % log_interval_ticks == 0:
                 set_all_traffic_lights_green(world, freeze=True)
 
             # 拉一帧摄像头（同步模式下每个 tick 应有一帧；阻塞等待）
@@ -856,7 +878,7 @@ def main() -> int:
             # bgra 来自 carla.Image.raw_data 的只读 buffer；FrameBuffer 内部会 copy。
             bgra = np.frombuffer(image.raw_data, dtype=np.uint8).reshape(image.height, image.width, 4)
             agent.push_camera_bgra(bgra)
-            # ego 状态（w 由 yaw 差分，与训练侧一致）
+            # ego 状态（模型 ego_motion 在 buffer 内按 5Hz 位置差分）
             agent.push_ego_snapshot()
             tt_sensor += time.perf_counter() - _t0
 
@@ -950,7 +972,7 @@ def main() -> int:
             tt_rec += time.perf_counter() - _t0
 
             # 简单日志
-            if tick_i % 8 == 0:
+            if tick_i % log_interval_ticks == 0:
                 speed = ego_vehicle.get_velocity()
                 v_mag = math.hypot(speed.x, speed.y) * 3.6
                 # L=legacy 每 tick 推理；R=replan；H<age>=持有 committed；F=fallback
@@ -1011,6 +1033,16 @@ def main() -> int:
 
     finally:
         # ── 清理 ──
+        if "agent" in locals():
+            try:
+                exported_h5 = agent.finalize_h5_export()
+                if exported_h5 is not None:
+                    logger.info(
+                        "开环兼容 H5 已写出：%s（可用 backbone_feature_pca_viewer --h5 读取）",
+                        exported_h5,
+                    )
+            except Exception:    # noqa: BLE001
+                logger.exception("闭环 H5 导出 finalize 异常")
         if recorder is not None:
             try:
                 recorder.close()

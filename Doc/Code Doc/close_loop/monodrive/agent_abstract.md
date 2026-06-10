@@ -19,7 +19,7 @@
 | 模型输入 | `images [1,8,3,288,512]`, `target_points [1,2]`, `ego_motion [1,3]` |
 | winner | `argmax(softmax(logits))`，可选 ``force_winner_idx`` 强制索引 |
 | 纵向差分 | 轨迹点间隔 `TRAJECTORY_DT=0.5s` |
-| 仿真 tick | `dt=0.125s`（8 FPS），用于 yaw_rate 与 PID |
+| 仿真 tick | `dt=0.2s`（5 FPS，与 B2D model_fps 一致） |
 
 ## 4. 使用规范
 
@@ -31,4 +31,6 @@
 
 | 日期 | 修改人 | 说明 |
 | --- | --- | --- |
+| 2026-06-10 | FuZiR_Cursor | 默认仿真 tick 改为 5Hz。 |
+
 | 2026-06-09 | FuZiR_Cursor | 自 JEPAAgent 迁移至 MonoDriveBackbone。 |

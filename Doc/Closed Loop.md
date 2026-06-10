@@ -11,7 +11,7 @@
 ```powershell
 # Carla 服务器（示例）
 cd <Carla安装目录>
-./CarlaUE4.sh -RenderOffScreen -nosound -fps=8
+./CarlaUE4.sh -RenderOffScreen -nosound -fps=5
 ```
 
 ## 运行闭环
@@ -38,13 +38,13 @@ cd F:\MonoDrive
 | `--camera-full-res` | 使用 B2D 采集分辨率 1600×900 |
 | `--no-residual` | 关闭轨迹 Tanh 残差修正，仅用词表轨迹 |
 | `--legacy-tracking` | 每 tick 推理 + ego-local 预瞄（默认 committed 模式） |
-| `--flip-y` | 翻转 y 轴（训练/仿真坐标系不一致时尝试） |
+| `--flip-y` | Carla→B2D 坐标对齐：取反 yaw，并修正 `ego_motion` / `target_point`（模型不接收 yaw） |
 
 ## 输入对齐
 
 闭环 agent 与 [`data/b2d_dataset.py`](../data/b2d_dataset.py) 使用相同约定：
 
-- 图像：最近 **8** 帧，B2D **CAM_FRONT** 对齐——水平 **FOV 70°**，外参 **cam2ego (0.8, 0, 1.6) m**（见 `datasets/scenes/*/anno/*.json.gz`）；默认 **800×450** Carla 相机（`--camera-full-res` → 1600×900）→ 288×512，值域 `[0, 1]`。
+- 图像：最近 **8** 帧、**5Hz** 间隔（跨度约 1.4s），B2D **CAM_FRONT** 对齐——水平 **FOV 70°**，外参 **cam2ego (0.8, 0, 1.6) m**；默认 **800×450** Carla 相机（`--camera-full-res` → 1600×900）→ 288×512，值域 `[0, 1]`。
 - `ego_motion`：`[Vx, Vy, W]`，anchor 帧 ego-local 物理量。
 - `target_point`：anchor 帧 ego-local 目标点 (m)。
 - 轨迹输出：256 路词表 + 残差，6 点 @ 2Hz（相邻点间隔 0.5 s）。
@@ -62,5 +62,6 @@ close_loop/
 
 | 日期 | 修改人 | 说明 |
 | --- | --- | --- |
+| 2026-06-10 | FuZiR_Cursor | Carla 服务端建议 `-fps=5`，与模型 5Hz 输入对齐。 |
 | 2026-06-09 | FuZiR_Cursor | 相机 FOV/外参与 B2D CAM_FRONT 对齐（70°，cam2ego 0.8/0/1.6 m）。 |
 | 2026-06-09 | FuZiR_Cursor | 自 JEPA 闭环迁移至 MonoDriveBackbone，新增本文档。 |

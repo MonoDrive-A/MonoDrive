@@ -20,6 +20,7 @@ import torch
 from data.b2d_dataset import B2DH5Dataset
 from model.backbone import (
     BackboneConfig,
+    BackboneTokenSlices,
     MonoDriveBackbone,
     MonoDriveBackboneOutput,
     load_backbone_config,
@@ -130,6 +131,82 @@ class BackboneFeaturePCAVisualizationData:
     layer_token_norms: np.ndarray
     model_outputs: ModelOutputVisualizationData
     all_detections: ModelOutputVisualizationData
+    forward_target_point: np.ndarray
+    forward_ego_motion: np.ndarray
+    mask_vision_embeddings: bool = False
+    zero_speed: bool = False
+    target_point_overridden: bool = False
+
+
+def _resolve_target_point_override(
+    target_x: float | None,
+    target_y: float | None,
+) -> tuple[float, float] | None:
+    """解析命令行目标点覆写；`--target-x` 与 `--target-y` 必须成对提供。"""
+
+    if target_x is None and target_y is None:
+        return None
+    if target_x is None or target_y is None:
+        raise ValueError("--target-x 与 --target-y 必须同时提供。")
+    return (float(target_x), float(target_y))
+
+
+def _build_forward_sample(
+    sample: dict[str, Any],
+    target_point_xy: tuple[float, float] | None = None,
+    zero_speed: bool = False,
+) -> dict[str, Any]:
+    """根据诊断覆写项构造前向与 BEV 可视化共用的样本字典。"""
+
+    forward_sample = dict(sample)
+    target_point = sample["target_point"].clone()
+    if target_point_xy is not None:
+        target_point = torch.tensor(target_point_xy, dtype=torch.float32)
+    ego_motion = sample["ego_motion"].clone()
+    if zero_speed:
+        ego_motion[0] = 0.0
+        ego_motion[1] = 0.0
+    forward_sample["target_point"] = target_point
+    forward_sample["ego_motion"] = ego_motion
+    return forward_sample
+
+
+def _zero_visual_related_tokens(
+    token_features: torch.Tensor,
+    token_slices: BackboneTokenSlices,
+) -> torch.Tensor:
+    """清零 visual_related 序列段，范围与 ModalIndependentFeedForward 一致。"""
+
+    visual_slice = slice(token_slices.vision.start, token_slices.register.stop)
+    masked_features = token_features.clone()
+    masked_features[:, visual_slice, :] = 0.0
+    return masked_features
+
+
+def _register_visual_related_mask_hooks(
+    model: MonoDriveBackbone,
+) -> list[torch.utils.hooks.RemovableHandle]:
+    """为每层 Transformer 注册 visual_related 持续清零 hook。"""
+
+    handles: list[torch.utils.hooks.RemovableHandle] = []
+
+    def pre_hook(_module: torch.nn.Module, inputs: tuple[Any, ...]) -> tuple[Any, ...]:
+        token_features, visual_positions, token_slices = inputs
+        masked_token_features = _zero_visual_related_tokens(token_features, token_slices)
+        return (masked_token_features, visual_positions, token_slices)
+
+    def post_hook(
+        _module: torch.nn.Module,
+        inputs: tuple[Any, ...],
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        _token_features, _visual_positions, token_slices = inputs
+        return _zero_visual_related_tokens(output, token_slices)
+
+    for transformer_block in model.transformer_blocks:
+        handles.append(transformer_block.register_forward_pre_hook(pre_hook))
+        handles.append(transformer_block.register_forward_hook(post_hook))
+    return handles
 
 
 def run_backbone_feature_pca_sample(
@@ -144,6 +221,9 @@ def run_backbone_feature_pca_sample(
     map_top_k: int = DEFAULT_MAP_TOP_K,
     agent_confidence_threshold: float = DEFAULT_AGENT_CONFIDENCE_THRESHOLD,
     map_confidence_threshold: float = DEFAULT_MAP_CONFIDENCE_THRESHOLD,
+    mask_vision_embeddings: bool = False,
+    target_point_xy: tuple[float, float] | None = None,
+    zero_speed: bool = False,
 ) -> BackboneFeaturePCAVisualizationData:
     """调用真实统一主干，收集每层视觉 Token PCA 数据。"""
 
@@ -205,16 +285,28 @@ def run_backbone_feature_pca_sample(
     )
     model.eval()
 
+    forward_sample = _build_forward_sample(
+        sample,
+        target_point_xy=target_point_xy,
+        zero_speed=zero_speed,
+    )
     images = sample["images"].unsqueeze(0).to(device=target_device)
-    target_points = sample["target_point"].unsqueeze(0).to(device=target_device)
-    ego_motion = sample["ego_motion"].unsqueeze(0).to(device=target_device)
-    with torch.no_grad():
-        backbone_output = model(
-            images=images,
-            target_points=target_points,
-            ego_motion=ego_motion,
-            return_layer_features=True,
-        )
+    target_points = forward_sample["target_point"].unsqueeze(0).to(device=target_device)
+    ego_motion = forward_sample["ego_motion"].unsqueeze(0).to(device=target_device)
+    mask_handles: list[torch.utils.hooks.RemovableHandle] = []
+    if mask_vision_embeddings:
+        mask_handles = _register_visual_related_mask_hooks(model)
+    try:
+        with torch.no_grad():
+            backbone_output = model(
+                images=images,
+                target_points=target_points,
+                ego_motion=ego_motion,
+                return_layer_features=True,
+            )
+    finally:
+        for handle in mask_handles:
+            handle.remove()
 
     display_images = _images_to_uint8(sample["images"])
     layer_pca_images, layer_token_norms = _summarize_backbone_layers(
@@ -224,7 +316,7 @@ def run_backbone_feature_pca_sample(
     model_outputs = _summarize_model_outputs(
         backbone_output,
         model,
-        sample,
+        forward_sample,
         model_weight_source=model_weight_source,
         trajectory_top_k=trajectory_top_k,
         agent_top_k=agent_top_k,
@@ -235,7 +327,7 @@ def run_backbone_feature_pca_sample(
     all_detections = _summarize_all_detections(
         backbone_output,
         model,
-        sample,
+        forward_sample,
         model_weight_source=model_weight_source,
     )
     return BackboneFeaturePCAVisualizationData(
@@ -265,6 +357,11 @@ def run_backbone_feature_pca_sample(
         layer_token_norms=layer_token_norms,
         model_outputs=model_outputs,
         all_detections=all_detections,
+        mask_vision_embeddings=mask_vision_embeddings,
+        forward_target_point=_tensor_to_numpy(forward_sample["target_point"]).astype(np.float32, copy=False),
+        forward_ego_motion=_tensor_to_numpy(forward_sample["ego_motion"]).astype(np.float32, copy=False),
+        zero_speed=zero_speed,
+        target_point_overridden=target_point_xy is not None,
     )
 
 
@@ -284,6 +381,9 @@ def render_backbone_feature_pca_sample(
     detection_bev_output_path: str | Path | None = None,
     save_detection_bev: bool = True,
     detection_bev_none_threshold: float = DEFAULT_DETECTION_BEV_NONE_THRESHOLD,
+    mask_vision_embeddings: bool = False,
+    target_point_xy: tuple[float, float] | None = None,
+    zero_speed: bool = False,
 ) -> tuple[Path, Path | None]:
     """运行真实统一主干并导出每层 PCA 诊断 PNG，可选额外保存全部检测 BEV。"""
 
@@ -301,6 +401,9 @@ def render_backbone_feature_pca_sample(
         map_top_k=map_top_k,
         agent_confidence_threshold=agent_confidence_threshold,
         map_confidence_threshold=map_confidence_threshold,
+        mask_vision_embeddings=mask_vision_embeddings,
+        target_point_xy=target_point_xy,
+        zero_speed=zero_speed,
     )
     rendered_image = render_visualization(visualization_data)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -315,6 +418,7 @@ def render_backbone_feature_pca_sample(
                 _resolve_project_path(h5_path, resolved_project_root, "h5_path"),
                 sample_index,
                 output.parent,
+                mask_vision_embeddings=mask_vision_embeddings,
             )
         )
         _validate_confidence_threshold(detection_bev_none_threshold, "detection_bev_none_threshold")
@@ -342,13 +446,18 @@ def render_visualization(data: BackboneFeaturePCAVisualizationData) -> Image.Ima
         f"backbone layer PCA | scene={data.scene_name} | "
         f"sample={data.sample_index} | frame={data.current_frame_id}"
     )
+    if data.mask_vision_embeddings:
+        title += " | vision_masked=True"
     draw.text((margin, 14), title, fill=(15, 23, 42), font=font)
-    draw.text(
-        (margin, 38),
-        "The viewer calls MonoDriveBackbone in FP32 and visualizes visual-token PCA after each Transformer layer.",
-        fill=(71, 85, 105),
-        font=font,
+    subtitle = (
+        "The viewer calls MonoDriveBackbone in FP32 and visualizes visual-token PCA after each Transformer layer."
     )
+    if data.mask_vision_embeddings:
+        subtitle = (
+            "Vision/register tokens are zeroed before and after every Transformer layer; "
+            "RGB panels still show real images for scene reference."
+        )
+    draw.text((margin, 38), subtitle, fill=(71, 85, 105), font=font)
 
     current_origin = (margin, 70)
     current_image = Image.fromarray(data.images[-1]).resize((512, 288), Image.Resampling.BILINEAR)
@@ -860,12 +969,21 @@ def _draw_metadata_panel(
 ) -> None:
     x0, y0 = origin
     width = 512
-    height = 430
+    height = 482
     config = data.backbone_config
+    target_x = float(data.forward_target_point[0])
+    target_y = float(data.forward_target_point[1])
+    ego_vx = float(data.forward_ego_motion[0])
+    ego_vy = float(data.forward_ego_motion[1])
+    ego_w = float(data.forward_ego_motion[2])
+    target_source = "cli override" if data.target_point_overridden else "h5 sample"
+    speed_source = "forced zero Vx/Vy" if data.zero_speed else "h5 sample"
     lines = [
         "backbone metadata",
         f"h5_path = {data.h5_path}",
         f"config_path = {data.config_path}",
+        f"forward target_point = [{target_x:.2f}, {target_y:.2f}] m ({target_source})",
+        f"forward ego_motion = [Vx={ego_vx:.2f}, Vy={ego_vy:.2f}, W={ego_w:.2f}] ({speed_source})",
         f"precision override = backbone:{data.backbone_dtype}, attention:{data.attention_dtype}",
         f"vision precision override = dinov3:{data.dinov3_dtype}, conv:{data.conv_dtype}",
         f"sequence shape = {data.sequence_shape}",
@@ -879,6 +997,13 @@ def _draw_metadata_panel(
         f"token order = {config.token_order}",
         "PCA is fitted per layer on all visual tokens from the sample.",
     ]
+    if data.mask_vision_embeddings:
+        lines.append(
+            "visual_related mask = vision + register, persistent per-layer zero "
+            f"(vision={data.vision_shape[1]}, register={config.register_token_count})"
+        )
+    else:
+        lines.append("visual_related mask = disabled")
     draw.rounded_rectangle([x0, y0, x0 + width, y0 + height], radius=8, fill=(255, 255, 255), outline=(203, 213, 225))
     for line_index, line in enumerate(lines):
         fill = (15, 23, 42) if line_index == 0 else (51, 65, 85)
@@ -1565,12 +1690,24 @@ def _validate_confidence_threshold(value: float, field_name: str) -> None:
         raise ValueError(f"{field_name} 必须在 [0, 1] 区间内，实际为 {threshold}。")
 
 
-def _default_output_path(h5_path: Path, sample_index: int, output_dir: Path) -> Path:
-    return output_dir / f"{h5_path.stem}_backbone_feature_pca_{sample_index:06d}.png"
+def _default_output_path(
+    h5_path: Path,
+    sample_index: int,
+    output_dir: Path,
+    mask_vision_embeddings: bool = False,
+) -> Path:
+    suffix = "_vision_masked" if mask_vision_embeddings else ""
+    return output_dir / f"{h5_path.stem}_backbone_feature_pca_{sample_index:06d}{suffix}.png"
 
 
-def _default_detection_bev_output_path(h5_path: Path, sample_index: int, output_dir: Path) -> Path:
-    return output_dir / f"{h5_path.stem}_detection_bev_{sample_index:06d}.png"
+def _default_detection_bev_output_path(
+    h5_path: Path,
+    sample_index: int,
+    output_dir: Path,
+    mask_vision_embeddings: bool = False,
+) -> Path:
+    suffix = "_vision_masked" if mask_vision_embeddings else ""
+    return output_dir / f"{h5_path.stem}_detection_bev_{sample_index:06d}{suffix}.png"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1644,10 +1781,38 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_DETECTION_BEV_NONE_THRESHOLD,
         help="额外检测 BEV 的 none 截断阈值；p(none) 超过该值的 query 不绘制，默认 1.0 表示不过滤。",
     )
+    parser.add_argument(
+        "--mask-vision-embeddings",
+        action="store_true",
+        help="逐层清零 vision + register token，用于诊断模型是否退化为统计估计。",
+    )
+    parser.add_argument(
+        "--target-x",
+        type=float,
+        default=None,
+        help="覆写前向目标点 ego x 坐标，单位 meter，前向为正；必须与 --target-y 成对使用。",
+    )
+    parser.add_argument(
+        "--target-y",
+        type=float,
+        default=None,
+        help="覆写前向目标点 ego y 坐标，单位 meter，左向为正；必须与 --target-x 成对使用。",
+    )
+    parser.add_argument(
+        "--zero-speed",
+        action="store_true",
+        help="将 ego_motion 的线速度 Vx/Vy 强制置 0，保留角速度 W。",
+    )
     args = parser.parse_args(argv)
+    target_point_xy = _resolve_target_point_override(args.target_x, args.target_y)
 
     project_root = PROJECT_ROOT.resolve()
-    output_path = args.output or _default_output_path(args.h5, args.sample_index, args.output_dir)
+    output_path = args.output or _default_output_path(
+        args.h5,
+        args.sample_index,
+        args.output_dir,
+        mask_vision_embeddings=args.mask_vision_embeddings,
+    )
     rendered_path, detection_bev_path = render_backbone_feature_pca_sample(
         h5_path=args.h5,
         sample_index=args.sample_index,
@@ -1664,6 +1829,9 @@ def main(argv: list[str] | None = None) -> int:
         detection_bev_output_path=args.detection_bev_output,
         save_detection_bev=not args.no_detection_bev,
         detection_bev_none_threshold=args.detection_bev_none_threshold,
+        mask_vision_embeddings=args.mask_vision_embeddings,
+        target_point_xy=target_point_xy,
+        zero_speed=args.zero_speed,
     )
     print(rendered_path)
     if detection_bev_path is not None:

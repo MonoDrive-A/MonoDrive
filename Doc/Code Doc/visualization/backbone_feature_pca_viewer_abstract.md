@@ -2,7 +2,7 @@
 
 ## 1. 文件基本功能
 
-`visualization/backbone_feature_pca_viewer.py` 对统一序列 Transformer 主干做 FP32 诊断可视化。它读取 B2D H5 样本，临时把主干、注意力和视觉嵌入精度覆盖为 FP32，可选从 checkpoint 加载真实训练权重，直接调用 `MonoDriveBackbone`，收集 16 层输出后的视觉 Token，并把每层视觉特征 PCA 到 RGB 后导出 PNG。它还会把同一次前向得到的轨迹、Agent 查询和 Map 查询反变换到 ego 米制 BEV 中展示；检测 query 先按包含 `none` 的完整类别 softmax argmax 定类，最高类别为 `none` 时不绘制；轨迹诊断栏显示词表概率统计和 top-k residual 修正。
+`visualization/backbone_feature_pca_viewer.py` 对统一序列 Transformer 主干做 FP32 诊断可视化。它读取 B2D H5 样本，临时把主干、注意力和视觉嵌入精度覆盖为 FP32，可选从 checkpoint 加载真实训练权重，直接调用 `MonoDriveBackbone`，收集 16 层输出后的视觉 Token，并把每层视觉特征 PCA 到 RGB 后导出 PNG。它还会把同一次前向得到的轨迹、Agent 查询和 Map 查询反变换到 ego 米制 BEV 中展示；检测 query 先按包含 `none` 的完整类别 softmax argmax 定类，最高类别为 `none` 时不绘制；轨迹诊断栏显示词表概率统计和 top-k residual 修正。可选 `--mask-vision-embeddings` 逐层清零 vision + register token，用于对比模型是否退化为统计估计；也可用 `--target-x`/`--target-y` 覆写目标点，或用 `--zero-speed` 强制线速度置零。
 
 ## 2. 主要公开接口
 
@@ -32,7 +32,7 @@
 | `run_backbone_feature_pca_sample` | 固定覆盖精度为 FP32，其余结构配置来自 `config/backbone.toml`。 |
 | `render_backbone_feature_pca_sample` | 输出路径必须位于项目目录内。 |
 | `render_visualization` | 只消费真实主干生成的数据，不执行模型逻辑。 |
-| `main` | 命令行运行，默认输出到项目内 `visualization/outputs/backbone_feature_pca/`，并额外保存检测 query BEV；可用 `--detection-bev-none-threshold` 按 `p(none)` 截断额外 BEV，也可用 `--checkpoint` 加载真实模型权重，以及 `--agent-top-k`、`--map-top-k` 和 `--agent-confidence-threshold` / `--map-confidence-threshold` 控制主诊断图检测绘制。 |
+| `main` | 命令行运行，默认输出到项目内 `visualization/outputs/backbone_feature_pca/`，并额外保存检测 query BEV；可用 `--detection-bev-none-threshold` 按 `p(none)` 截断额外 BEV，也可用 `--checkpoint` 加载真实模型权重，以及 `--agent-top-k`、`--map-top-k` 和 `--agent-confidence-threshold` / `--map-confidence-threshold` 控制主诊断图检测绘制；`--mask-vision-embeddings` 开启 visual_related 逐层清零并追加 `_vision_masked` 输出后缀；`--target-x`/`--target-y` 与 `--zero-speed` 可覆写前向目标点和线速度。 |
 
 ## 5. 最小使用示例
 
@@ -52,6 +52,8 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Composer | AI 完成：新增 `--target-x`/`--target-y` 与 `--zero-speed` 前向输入覆写。 |
+| 2026-06-10 | 1os3_Composer | AI 完成：新增 `--mask-vision-embeddings`，逐层清零 vision + register token 用于统计估计诊断。 |
 | 2026-06-10 | 1os3_Composer | AI 完成：额外检测 BEV 支持 `--detection-bev-none-threshold` none 截断。 |
 | 2026-06-10 | 1os3_Composer | AI 完成：默认额外保存全部检测 query 的独立 BEV PNG。 |
 | 2026-06-09 | 1os3_Composer | AI 完成：已绘制 Agent 标签同时显示 argmax 类别概率和 `none` 概率。 |
