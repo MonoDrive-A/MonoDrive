@@ -52,6 +52,7 @@ DEFAULT_AGENT_TOP_K = 16
 DEFAULT_MAP_TOP_K = 32
 DEFAULT_AGENT_CONFIDENCE_THRESHOLD = 0.0
 DEFAULT_MAP_CONFIDENCE_THRESHOLD = 0.0
+DEFAULT_DETECTION_BEV_NONE_THRESHOLD = 1.0
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class ModelOutputVisualizationData:
         `agent_boxes`: `[A, 6]`，`[x, y, l, w, h, yaw]`。
         `agent_none_scores`: `[A]`，完整类别 softmax 上的 `none` 概率。
         `agent_future_points`: `[A, 6, 2]`，ego 坐标系米制 Agent future。
+        `map_none_scores`: `[M]`，完整类别 softmax 上的 `none` 概率。
         `map_points`: `[M, 100, 2]`，ego 坐标系米制 Map 点。
     """
 
@@ -85,6 +87,7 @@ class ModelOutputVisualizationData:
     map_scores: np.ndarray
     map_class_ids: np.ndarray
     map_class_labels: np.ndarray
+    map_none_scores: np.ndarray
     map_points: np.ndarray
     model_weight_source: str
     agent_confidence_threshold: float
@@ -99,7 +102,8 @@ class BackboneFeaturePCAVisualizationData:
         `images`: `[8, H, W, 3]`，RGB uint8 图像。
         `layer_pca_images`: `[L, T_latent, H, W, 3]`，每层视觉 Token PCA RGB 上采样图。
         `layer_token_norms`: `[L, T_latent, H_patch, W_patch]`，每层视觉 Token L2 norm。
-        `model_outputs`: 检测、轨迹和地图预测的 BEV 可视化数据。
+        `model_outputs`: 过滤后的检测、轨迹和地图预测 BEV 可视化数据。
+        `all_detections`: 全部 Agent/Map 检测 query 的 BEV 可视化数据。
     """
 
     scene_name: str
@@ -125,6 +129,7 @@ class BackboneFeaturePCAVisualizationData:
     layer_pca_images: np.ndarray
     layer_token_norms: np.ndarray
     model_outputs: ModelOutputVisualizationData
+    all_detections: ModelOutputVisualizationData
 
 
 def run_backbone_feature_pca_sample(
@@ -227,6 +232,12 @@ def run_backbone_feature_pca_sample(
         agent_confidence_threshold=agent_confidence_threshold,
         map_confidence_threshold=map_confidence_threshold,
     )
+    all_detections = _summarize_all_detections(
+        backbone_output,
+        model,
+        sample,
+        model_weight_source=model_weight_source,
+    )
     return BackboneFeaturePCAVisualizationData(
         scene_name=str(sample["scene_name"]),
         h5_path=resolved_h5_path,
@@ -253,6 +264,7 @@ def run_backbone_feature_pca_sample(
         layer_pca_images=layer_pca_images,
         layer_token_norms=layer_token_norms,
         model_outputs=model_outputs,
+        all_detections=all_detections,
     )
 
 
@@ -269,8 +281,11 @@ def render_backbone_feature_pca_sample(
     map_top_k: int = DEFAULT_MAP_TOP_K,
     agent_confidence_threshold: float = DEFAULT_AGENT_CONFIDENCE_THRESHOLD,
     map_confidence_threshold: float = DEFAULT_MAP_CONFIDENCE_THRESHOLD,
-) -> Path:
-    """运行真实统一主干并导出每层 PCA 诊断 PNG。"""
+    detection_bev_output_path: str | Path | None = None,
+    save_detection_bev: bool = True,
+    detection_bev_none_threshold: float = DEFAULT_DETECTION_BEV_NONE_THRESHOLD,
+) -> tuple[Path, Path | None]:
+    """运行真实统一主干并导出每层 PCA 诊断 PNG，可选额外保存全部检测 BEV。"""
 
     resolved_project_root = Path(project_root).resolve()
     output = _resolve_project_path(output_path, resolved_project_root, "output_path")
@@ -290,7 +305,27 @@ def render_backbone_feature_pca_sample(
     rendered_image = render_visualization(visualization_data)
     output.parent.mkdir(parents=True, exist_ok=True)
     rendered_image.save(output)
-    return output
+
+    saved_detection_bev_path: Path | None = None
+    if save_detection_bev:
+        resolved_detection_bev_output = (
+            _resolve_project_path(detection_bev_output_path, resolved_project_root, "detection_bev_output_path")
+            if detection_bev_output_path is not None
+            else _default_detection_bev_output_path(
+                _resolve_project_path(h5_path, resolved_project_root, "h5_path"),
+                sample_index,
+                output.parent,
+            )
+        )
+        _validate_confidence_threshold(detection_bev_none_threshold, "detection_bev_none_threshold")
+        detection_bev_image = render_all_detections_bev(
+            visualization_data,
+            none_threshold=detection_bev_none_threshold,
+        )
+        resolved_detection_bev_output.parent.mkdir(parents=True, exist_ok=True)
+        detection_bev_image.save(resolved_detection_bev_output)
+        saved_detection_bev_path = resolved_detection_bev_output
+    return output, saved_detection_bev_path
 
 
 def render_visualization(data: BackboneFeaturePCAVisualizationData) -> Image.Image:
@@ -340,6 +375,129 @@ def render_visualization(data: BackboneFeaturePCAVisualizationData) -> Image.Ima
     return canvas
 
 
+def render_all_detections_bev(
+    data: BackboneFeaturePCAVisualizationData,
+    none_threshold: float = DEFAULT_DETECTION_BEV_NONE_THRESHOLD,
+) -> Image.Image:
+    """把 Agent/Map 检测 query 渲染为独立 BEV PNG，并按 none 概率阈值截断。"""
+
+    _validate_confidence_threshold(none_threshold, "none_threshold")
+    filtered_detections = _filter_detection_outputs_by_none_threshold(data.all_detections, none_threshold)
+
+    font = ImageFont.load_default()
+    config = _OutputBevConfig(width=768, height=768)
+    margin = 24
+    header_height = 118
+    footer_height = 118
+    canvas_width = config.width + margin * 2
+    canvas_height = config.height + header_height + footer_height
+    canvas = Image.new("RGB", (canvas_width, canvas_height), (248, 250, 252))
+    draw = ImageDraw.Draw(canvas)
+
+    title = (
+        f"detection queries BEV | scene={data.scene_name} | "
+        f"sample={data.sample_index} | frame={data.current_frame_id}"
+    )
+    draw.text((margin, 16), title, fill=(15, 23, 42), font=font)
+    draw.text(
+        (margin, 40),
+        (
+            "Agent/map queries are drawn by query index; queries with "
+            f"p(none) > {none_threshold:.3f} are truncated."
+        ),
+        fill=(71, 85, 105),
+        font=font,
+    )
+    draw.text(
+        (margin, 64),
+        (
+            f"shown agents={len(filtered_detections.agent_boxes)}/"
+            f"{len(data.all_detections.agent_boxes)}, "
+            f"shown maps={len(filtered_detections.map_points)}/"
+            f"{len(data.all_detections.map_points)}, "
+            f"weights={filtered_detections.model_weight_source}"
+        ),
+        fill=(71, 85, 105),
+        font=font,
+    )
+
+    bev_origin = (margin, header_height)
+    bev_panel = _render_detection_bev_panel(
+        filtered_detections,
+        config=config,
+        draw_trajectories=False,
+        draw_gt_trajectory=True,
+        draw_target_point=True,
+        include_none_agents=True,
+    )
+    canvas.paste(bev_panel, bev_origin)
+
+    footer_y = header_height + config.height + 16
+    draw.rounded_rectangle(
+        [margin, footer_y, margin + config.width, footer_y + 96],
+        radius=8,
+        fill=(255, 255, 255),
+        outline=(203, 213, 225),
+    )
+    agent_hidden_by_none = len(data.all_detections.agent_boxes) - len(filtered_detections.agent_boxes)
+    map_hidden_by_none = len(data.all_detections.map_points) - len(filtered_detections.map_points)
+    agent_none_argmax_count = int(np.sum(filtered_detections.agent_class_labels == "none"))
+    map_none_argmax_count = int(np.sum(filtered_detections.map_class_labels == "none"))
+    legend_lines = [
+        (
+            f"agent shown = {len(filtered_detections.agent_boxes)}, "
+            f"hidden by none>{none_threshold:.3f} = {agent_hidden_by_none}, "
+            f"argmax none = {agent_none_argmax_count}"
+        ),
+        (
+            f"map shown = {len(filtered_detections.map_points)}, "
+            f"hidden by none>{none_threshold:.3f} = {map_hidden_by_none}, "
+            f"argmax none = {map_none_argmax_count}"
+        ),
+        "solid boxes/polylines use class colors; dashed gray boxes are argmax none agents",
+        "coordinates are inverse Symlog or expm1 decoded for visualization only",
+    ]
+    for line_index, line in enumerate(legend_lines):
+        draw.text((margin + 14, footer_y + 14 + line_index * 22), line, fill=(51, 65, 85), font=font)
+    return canvas
+
+
+def _filter_detection_outputs_by_none_threshold(
+    outputs: ModelOutputVisualizationData,
+    none_threshold: float,
+) -> ModelOutputVisualizationData:
+    """按 none 概率阈值截断检测 query，`p(none) > threshold` 的 query 不展示。"""
+
+    agent_keep_mask = outputs.agent_none_scores <= none_threshold
+    map_keep_mask = outputs.map_none_scores <= none_threshold
+    return ModelOutputVisualizationData(
+        target_point=outputs.target_point,
+        future_trajectory=outputs.future_trajectory,
+        trajectory_vocab_probabilities=outputs.trajectory_vocab_probabilities,
+        top_trajectory_indices=outputs.top_trajectory_indices,
+        top_trajectory_scores=outputs.top_trajectory_scores,
+        top_trajectory_vocab_points=outputs.top_trajectory_vocab_points,
+        top_trajectory_residuals=outputs.top_trajectory_residuals,
+        top_trajectory_corrections=outputs.top_trajectory_corrections,
+        top_trajectory_points=outputs.top_trajectory_points,
+        agent_scores=outputs.agent_scores[agent_keep_mask],
+        agent_class_ids=outputs.agent_class_ids[agent_keep_mask],
+        agent_class_labels=outputs.agent_class_labels[agent_keep_mask],
+        agent_none_scores=outputs.agent_none_scores[agent_keep_mask],
+        agent_boxes=outputs.agent_boxes[agent_keep_mask],
+        agent_mode_ids=outputs.agent_mode_ids[agent_keep_mask],
+        agent_future_points=outputs.agent_future_points[agent_keep_mask],
+        map_scores=outputs.map_scores[map_keep_mask],
+        map_class_ids=outputs.map_class_ids[map_keep_mask],
+        map_class_labels=outputs.map_class_labels[map_keep_mask],
+        map_none_scores=outputs.map_none_scores[map_keep_mask],
+        map_points=outputs.map_points[map_keep_mask],
+        model_weight_source=outputs.model_weight_source,
+        agent_confidence_threshold=outputs.agent_confidence_threshold,
+        map_confidence_threshold=outputs.map_confidence_threshold,
+    )
+
+
 @dataclass(frozen=True)
 class _OutputBevConfig:
     """模型输出 BEV 面板配置，坐标为 ego 米制坐标系。"""
@@ -371,6 +529,55 @@ class _OutputBevTransform:
         )
 
 
+def _render_detection_bev_panel(
+    outputs: ModelOutputVisualizationData,
+    config: _OutputBevConfig | None = None,
+    draw_trajectories: bool = True,
+    draw_gt_trajectory: bool = False,
+    draw_target_point: bool = True,
+    include_none_agents: bool = False,
+) -> Image.Image:
+    """渲染检测 BEV 面板，可选择是否绘制轨迹与 argmax 为 none 的 Agent。"""
+
+    resolved_config = config or _OutputBevConfig()
+    transform = _OutputBevTransform(resolved_config)
+    font = ImageFont.load_default()
+    panel = Image.new("RGB", (resolved_config.width, resolved_config.height), (255, 255, 255))
+    panel_draw = ImageDraw.Draw(panel)
+
+    _draw_output_grid(panel_draw, transform, resolved_config, font)
+    _draw_output_ego(panel_draw, transform)
+    _draw_output_maps(panel_draw, transform, outputs)
+    if draw_gt_trajectory:
+        gt_points = [
+            transform.to_pixel(float(point[0]), float(point[1]))
+            for point in outputs.future_trajectory
+        ]
+        if gt_points:
+            panel_draw.line(
+                [transform.to_pixel(0.0, 0.0), *gt_points],
+                fill=(15, 23, 42),
+                width=3,
+            )
+    if draw_trajectories:
+        _draw_output_trajectories(panel_draw, transform, outputs)
+    _draw_output_agents(
+        panel_draw,
+        transform,
+        outputs,
+        include_none_agents=include_none_agents,
+    )
+    if draw_target_point:
+        _draw_output_target(panel_draw, transform, outputs.target_point, "target", (22, 163, 74), font)
+
+    panel_draw.rectangle(
+        [0, 0, resolved_config.width - 1, resolved_config.height - 1],
+        outline=(100, 116, 139),
+        width=2,
+    )
+    return panel
+
+
 def _draw_model_outputs_panel(
     canvas: Image.Image,
     draw: ImageDraw.ImageDraw,
@@ -380,18 +587,7 @@ def _draw_model_outputs_panel(
 ) -> None:
     x0, y0 = origin
     config = _OutputBevConfig()
-    transform = _OutputBevTransform(config)
-    panel = Image.new("RGB", (config.width, config.height), (255, 255, 255))
-    panel_draw = ImageDraw.Draw(panel)
-
-    _draw_output_grid(panel_draw, transform, config, font)
-    _draw_output_ego(panel_draw, transform)
-    _draw_output_maps(panel_draw, transform, outputs)
-    _draw_output_trajectories(panel_draw, transform, outputs)
-    _draw_output_agents(panel_draw, transform, outputs)
-    _draw_output_target(panel_draw, transform, outputs.target_point, "target", (22, 163, 74), font)
-
-    panel_draw.rectangle([0, 0, config.width - 1, config.height - 1], outline=(100, 116, 139), width=2)
+    panel = _render_detection_bev_panel(outputs, config=config)
     canvas.paste(panel, origin)
     _draw_panel_label(draw, origin, "model outputs BEV", font)
 
@@ -477,10 +673,15 @@ def _draw_output_agents(
     draw: ImageDraw.ImageDraw,
     transform: _OutputBevTransform,
     outputs: ModelOutputVisualizationData,
+    include_none_agents: bool = False,
 ) -> None:
     for agent_index, box in enumerate(outputs.agent_boxes):
+        class_label = str(outputs.agent_class_labels[agent_index])
+        is_none_agent = class_label == "none"
+        if is_none_agent and not include_none_agents:
+            continue
         class_id = int(outputs.agent_class_ids[agent_index])
-        color = AGENT_CLASS_COLORS.get(class_id, (71, 85, 105))
+        color = (148, 163, 184) if is_none_agent else AGENT_CLASS_COLORS.get(class_id, (71, 85, 105))
         future_points = outputs.agent_future_points[agent_index]
         center_xy = box[:2]
         future_pixels = [
@@ -488,15 +689,21 @@ def _draw_output_agents(
             for point in future_points
             if transform.in_view(float(point[0]), float(point[1]))
         ]
-        if future_pixels:
+        if future_pixels and not is_none_agent:
             start = transform.to_pixel(float(center_xy[0]), float(center_xy[1]))
             draw.line([start, *future_pixels], fill=color, width=1)
-        _draw_output_agent_box(draw, transform, box, color)
+        _draw_output_agent_box(
+            draw,
+            transform,
+            box,
+            color,
+            dashed_outline=is_none_agent,
+        )
         label_point = transform.to_pixel(float(center_xy[0]), float(center_xy[1]))
         draw.text(
             (label_point[0] + 4, label_point[1] - 8),
             (
-                f"{str(outputs.agent_class_labels[agent_index])}:{float(outputs.agent_scores[agent_index]):.2f} "
+                f"{class_label}:{float(outputs.agent_scores[agent_index]):.2f} "
                 f"none:{float(outputs.agent_none_scores[agent_index]):.2f}"
             ),
             fill=color,
@@ -508,6 +715,7 @@ def _draw_output_agent_box(
     transform: _OutputBevTransform,
     box: np.ndarray,
     color: tuple[int, int, int],
+    dashed_outline: bool = False,
 ) -> None:
     center_x, center_y, length, width, _height, yaw = [float(value) for value in box[:6]]
     if not transform.in_view(center_x, center_y):
@@ -526,8 +734,48 @@ def _draw_output_agent_box(
         ego_x = center_x + local_x * cos_yaw - local_y * sin_yaw
         ego_y = center_y + local_x * sin_yaw + local_y * cos_yaw
         corners.append(transform.to_pixel(ego_x, ego_y))
-    draw.polygon(corners, outline=color)
-    draw.line([corners[0], corners[3]], fill=color, width=2)
+    if dashed_outline:
+        for start_index in range(len(corners)):
+            end_index = (start_index + 1) % len(corners)
+            _draw_dashed_line(draw, corners[start_index], corners[end_index], color=color, width=1)
+    else:
+        draw.polygon(corners, outline=color)
+        draw.line([corners[0], corners[3]], fill=color, width=2)
+
+
+def _draw_dashed_line(
+    draw: ImageDraw.ImageDraw,
+    start: tuple[int, int],
+    end: tuple[int, int],
+    color: tuple[int, int, int],
+    width: int = 1,
+    dash_length: int = 6,
+    gap_length: int = 4,
+) -> None:
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    segment_length = math.hypot(dx, dy)
+    if segment_length <= 1e-6:
+        return
+    unit_x = dx / segment_length
+    unit_y = dy / segment_length
+    traveled = 0.0
+    draw_dash = True
+    while traveled < segment_length:
+        step = dash_length if draw_dash else gap_length
+        next_traveled = min(segment_length, traveled + step)
+        if draw_dash:
+            p0 = (
+                int(round(start[0] + unit_x * traveled)),
+                int(round(start[1] + unit_y * traveled)),
+            )
+            p1 = (
+                int(round(start[0] + unit_x * next_traveled)),
+                int(round(start[1] + unit_y * next_traveled)),
+            )
+            draw.line([p0, p1], fill=color, width=width)
+        traveled = next_traveled
+        draw_dash = not draw_dash
 
 
 def _draw_output_maps(
@@ -536,8 +784,9 @@ def _draw_output_maps(
     outputs: ModelOutputVisualizationData,
 ) -> None:
     for map_index, points_xy in enumerate(outputs.map_points):
+        class_label = str(outputs.map_class_labels[map_index])
         class_id = int(outputs.map_class_ids[map_index])
-        color = MAP_CLASS_COLORS.get(class_id, (100, 116, 139))
+        color = (148, 163, 184) if class_label == "none" else MAP_CLASS_COLORS.get(class_id, (100, 116, 139))
         pixels = [
             transform.to_pixel(float(point_xy[0]), float(point_xy[1]))
             for point_xy in points_xy
@@ -803,6 +1052,70 @@ def _draw_trajectory_diagnostics(
         )
 
 
+def _summarize_all_detections(
+    backbone_output: MonoDriveBackboneOutput,
+    model: MonoDriveBackbone,
+    sample: dict[str, Any],
+    model_weight_source: str,
+) -> ModelOutputVisualizationData:
+    """把全部 Agent/Map 检测 query 转换为 BEV 可视化数据，不做 none 或置信度过滤。"""
+
+    (
+        agent_scores,
+        agent_class_ids,
+        agent_class_labels,
+        agent_none_scores,
+        agent_boxes,
+        agent_mode_ids,
+        agent_future_points,
+    ) = _summarize_agent_outputs(
+        backbone_output,
+        model,
+        top_k=model.detection_config.agent_query_count,
+        confidence_threshold=0.0,
+        include_all_queries=True,
+    )
+    (
+        map_scores,
+        map_class_ids,
+        map_class_labels,
+        map_none_scores,
+        map_points,
+    ) = _summarize_map_outputs(
+        backbone_output,
+        model,
+        top_k=model.detection_config.map_query_count,
+        confidence_threshold=0.0,
+        include_all_queries=True,
+    )
+    return ModelOutputVisualizationData(
+        target_point=_tensor_to_numpy(sample["target_point"]).astype(np.float32, copy=False),
+        future_trajectory=_tensor_to_numpy(sample["future_trajectory"]).astype(np.float32, copy=False),
+        trajectory_vocab_probabilities=np.empty((0,), dtype=np.float32),
+        top_trajectory_indices=np.empty((0,), dtype=np.int32),
+        top_trajectory_scores=np.empty((0,), dtype=np.float32),
+        top_trajectory_vocab_points=np.empty((0, 0, 2), dtype=np.float32),
+        top_trajectory_residuals=np.empty((0, 0, 2), dtype=np.float32),
+        top_trajectory_corrections=np.empty((0, 0, 2), dtype=np.float32),
+        top_trajectory_points=np.empty((0, 0, 2), dtype=np.float32),
+        agent_scores=agent_scores,
+        agent_class_ids=agent_class_ids,
+        agent_class_labels=agent_class_labels,
+        agent_none_scores=agent_none_scores,
+        agent_boxes=agent_boxes,
+        agent_mode_ids=agent_mode_ids,
+        agent_future_points=agent_future_points,
+        map_scores=map_scores,
+        map_class_ids=map_class_ids,
+        map_class_labels=map_class_labels,
+        map_none_scores=map_none_scores,
+        map_points=map_points,
+        model_weight_source=model_weight_source,
+        agent_confidence_threshold=0.0,
+        map_confidence_threshold=0.0,
+    )
+
+
 def _summarize_model_outputs(
     backbone_output: MonoDriveBackboneOutput,
     model: MonoDriveBackbone,
@@ -843,7 +1156,13 @@ def _summarize_model_outputs(
         agent_top_k,
         agent_confidence_threshold,
     )
-    map_scores, map_class_ids, map_class_labels, map_points = _summarize_map_outputs(
+    (
+        map_scores,
+        map_class_ids,
+        map_class_labels,
+        map_none_scores,
+        map_points,
+    ) = _summarize_map_outputs(
         backbone_output,
         model,
         map_top_k,
@@ -869,6 +1188,7 @@ def _summarize_model_outputs(
         map_scores=map_scores,
         map_class_ids=map_class_ids,
         map_class_labels=map_class_labels,
+        map_none_scores=map_none_scores,
         map_points=map_points,
         model_weight_source=model_weight_source,
         agent_confidence_threshold=float(agent_confidence_threshold),
@@ -910,6 +1230,7 @@ def _summarize_agent_outputs(
     model: MonoDriveBackbone,
     top_k: int,
     confidence_threshold: float,
+    include_all_queries: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     detection_output = backbone_output.detection_output
     class_logits = detection_output.agent_class_logits[0].detach().to(dtype=torch.float32).cpu()
@@ -921,34 +1242,38 @@ def _summarize_agent_outputs(
     query_scores, class_ids = class_probabilities.max(dim=-1)
     none_class_id = len(model.detection_config.agent_class_names)
     none_scores = class_probabilities[:, none_class_id]
-    non_none_indices = torch.nonzero(class_ids != none_class_id, as_tuple=False).flatten()
-    if int(non_none_indices.numel()) == 0:
-        return (
-            np.empty((0,), dtype=np.float32),
-            np.empty((0,), dtype=np.int32),
-            np.empty((0,), dtype=object),
-            np.empty((0,), dtype=np.float32),
-            np.empty((0, 6), dtype=np.float32),
-            np.empty((0,), dtype=np.int32),
-            np.empty((0, model.detection_config.agent_future_points, 2), dtype=np.float32),
-        )
-    candidate_scores = query_scores[non_none_indices]
-    confidence_mask = candidate_scores >= confidence_threshold
-    filtered_indices = non_none_indices[confidence_mask]
-    filtered_scores = candidate_scores[confidence_mask]
-    if int(filtered_scores.numel()) == 0:
-        return (
-            np.empty((0,), dtype=np.float32),
-            np.empty((0,), dtype=np.int32),
-            np.empty((0,), dtype=object),
-            np.empty((0,), dtype=np.float32),
-            np.empty((0, 6), dtype=np.float32),
-            np.empty((0,), dtype=np.int32),
-            np.empty((0, model.detection_config.agent_future_points, 2), dtype=np.float32),
-        )
-    selected_count = min(top_k, int(filtered_scores.numel()))
-    selected_scores, candidate_order = torch.topk(filtered_scores, k=selected_count)
-    selected_indices = filtered_indices[candidate_order]
+    if include_all_queries:
+        selected_indices = torch.arange(class_logits.shape[0], dtype=torch.long)
+        selected_scores = query_scores[selected_indices]
+    else:
+        non_none_indices = torch.nonzero(class_ids != none_class_id, as_tuple=False).flatten()
+        if int(non_none_indices.numel()) == 0:
+            return (
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.int32),
+                np.empty((0,), dtype=object),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0, 6), dtype=np.float32),
+                np.empty((0,), dtype=np.int32),
+                np.empty((0, model.detection_config.agent_future_points, 2), dtype=np.float32),
+            )
+        candidate_scores = query_scores[non_none_indices]
+        confidence_mask = candidate_scores >= confidence_threshold
+        filtered_indices = non_none_indices[confidence_mask]
+        filtered_scores = candidate_scores[confidence_mask]
+        if int(filtered_scores.numel()) == 0:
+            return (
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.int32),
+                np.empty((0,), dtype=object),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0, 6), dtype=np.float32),
+                np.empty((0,), dtype=np.int32),
+                np.empty((0, model.detection_config.agent_future_points, 2), dtype=np.float32),
+            )
+        selected_count = min(top_k, int(filtered_scores.numel()))
+        selected_scores, candidate_order = torch.topk(filtered_scores, k=selected_count)
+        selected_indices = filtered_indices[candidate_order]
     selected_class_ids = class_ids[selected_indices]
     class_labels = _select_class_labels(
         (*model.detection_config.agent_class_names, model.detection_config.agent_none_class_name),
@@ -983,45 +1308,55 @@ def _summarize_map_outputs(
     model: MonoDriveBackbone,
     top_k: int,
     confidence_threshold: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    include_all_queries: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     detection_output = backbone_output.detection_output
     class_logits = detection_output.map_class_logits[0].detach().to(dtype=torch.float32).cpu()
     points = detection_output.map_points[0].detach().to(dtype=torch.float32).cpu()
     class_probabilities = torch.softmax(class_logits, dim=-1)
     query_scores, class_ids = class_probabilities.max(dim=-1)
     none_class_id = len(model.detection_config.map_class_names)
-    non_none_indices = torch.nonzero(class_ids != none_class_id, as_tuple=False).flatten()
-    if int(non_none_indices.numel()) == 0:
-        return (
-            np.empty((0,), dtype=np.float32),
-            np.empty((0,), dtype=np.int32),
-            np.empty((0,), dtype=object),
-            np.empty((0, model.detection_config.map_point_count, 2), dtype=np.float32),
-        )
-    candidate_scores = query_scores[non_none_indices]
-    confidence_mask = candidate_scores >= confidence_threshold
-    filtered_indices = non_none_indices[confidence_mask]
-    filtered_scores = candidate_scores[confidence_mask]
-    if int(filtered_scores.numel()) == 0:
-        return (
-            np.empty((0,), dtype=np.float32),
-            np.empty((0,), dtype=np.int32),
-            np.empty((0,), dtype=object),
-            np.empty((0, model.detection_config.map_point_count, 2), dtype=np.float32),
-        )
-    selected_count = min(top_k, int(filtered_scores.numel()))
-    selected_scores, candidate_order = torch.topk(filtered_scores, k=selected_count)
-    selected_indices = filtered_indices[candidate_order]
+    none_scores = class_probabilities[:, none_class_id]
+    if include_all_queries:
+        selected_indices = torch.arange(class_logits.shape[0], dtype=torch.long)
+        selected_scores = query_scores[selected_indices]
+    else:
+        non_none_indices = torch.nonzero(class_ids != none_class_id, as_tuple=False).flatten()
+        if int(non_none_indices.numel()) == 0:
+            return (
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.int32),
+                np.empty((0,), dtype=object),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0, model.detection_config.map_point_count, 2), dtype=np.float32),
+            )
+        candidate_scores = query_scores[non_none_indices]
+        confidence_mask = candidate_scores >= confidence_threshold
+        filtered_indices = non_none_indices[confidence_mask]
+        filtered_scores = candidate_scores[confidence_mask]
+        if int(filtered_scores.numel()) == 0:
+            return (
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.int32),
+                np.empty((0,), dtype=object),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0, model.detection_config.map_point_count, 2), dtype=np.float32),
+            )
+        selected_count = min(top_k, int(filtered_scores.numel()))
+        selected_scores, candidate_order = torch.topk(filtered_scores, k=selected_count)
+        selected_indices = filtered_indices[candidate_order]
     selected_class_ids = class_ids[selected_indices]
     class_labels = _select_class_labels(
         (*model.detection_config.map_class_names, model.detection_config.map_none_class_name),
         selected_class_ids,
     )
     selected_points = _inverse_symlog(points[selected_indices])
+    selected_none_scores = none_scores[selected_indices]
     return (
         selected_scores.numpy().astype(np.float32, copy=False),
         selected_class_ids.numpy().astype(np.int32, copy=False),
         class_labels,
+        selected_none_scores.numpy().astype(np.float32, copy=False),
         selected_points.numpy().astype(np.float32, copy=False),
     )
 
@@ -1234,6 +1569,10 @@ def _default_output_path(h5_path: Path, sample_index: int, output_dir: Path) -> 
     return output_dir / f"{h5_path.stem}_backbone_feature_pca_{sample_index:06d}.png"
 
 
+def _default_detection_bev_output_path(h5_path: Path, sample_index: int, output_dir: Path) -> Path:
+    return output_dir / f"{h5_path.stem}_detection_bev_{sample_index:06d}.png"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="运行统一主干并导出每层视觉特征 PCA 诊断图。")
     parser.add_argument("--h5", type=Path, required=True, help="预处理后的逐场景 H5 文件。")
@@ -1288,11 +1627,28 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MAP_CONFIDENCE_THRESHOLD,
         help="Map 检测 query 的最低 argmax 类别概率，低于该阈值的非 none query 不绘制。",
     )
+    parser.add_argument(
+        "--detection-bev-output",
+        type=Path,
+        default=None,
+        help="额外保存全部检测 query BEV 的 PNG 路径；默认与主输出同目录。",
+    )
+    parser.add_argument(
+        "--no-detection-bev",
+        action="store_true",
+        help="不额外保存全部检测 query BEV PNG。",
+    )
+    parser.add_argument(
+        "--detection-bev-none-threshold",
+        type=float,
+        default=DEFAULT_DETECTION_BEV_NONE_THRESHOLD,
+        help="额外检测 BEV 的 none 截断阈值；p(none) 超过该值的 query 不绘制，默认 1.0 表示不过滤。",
+    )
     args = parser.parse_args(argv)
 
     project_root = PROJECT_ROOT.resolve()
     output_path = args.output or _default_output_path(args.h5, args.sample_index, args.output_dir)
-    rendered_path = render_backbone_feature_pca_sample(
+    rendered_path, detection_bev_path = render_backbone_feature_pca_sample(
         h5_path=args.h5,
         sample_index=args.sample_index,
         config_path=args.config,
@@ -1305,8 +1661,13 @@ def main(argv: list[str] | None = None) -> int:
         map_top_k=args.map_top_k,
         agent_confidence_threshold=args.agent_confidence_threshold,
         map_confidence_threshold=args.map_confidence_threshold,
+        detection_bev_output_path=args.detection_bev_output,
+        save_detection_bev=not args.no_detection_bev,
+        detection_bev_none_threshold=args.detection_bev_none_threshold,
     )
     print(rendered_path)
+    if detection_bev_path is not None:
+        print(detection_bev_path)
     return 0
 
 

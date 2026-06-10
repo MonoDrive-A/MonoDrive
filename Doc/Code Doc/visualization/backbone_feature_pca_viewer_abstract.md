@@ -11,8 +11,9 @@
 | `ModelOutputVisualizationData` | dataclass | 模型输出 BEV 面板和轨迹概率/residual 诊断栏所需的数据。 |
 | `BackboneFeaturePCAVisualizationData` | dataclass | PNG 渲染所需的数据。 |
 | `run_backbone_feature_pca_sample` | function | 调用真实主干并返回 PCA 数据。 |
-| `render_backbone_feature_pca_sample` | function | 运行主干并保存 PNG。 |
+| `render_backbone_feature_pca_sample` | function | 运行主干并保存 PNG，默认额外保存全部检测 BEV。 |
 | `render_visualization` | function | 渲染 PIL 图像。 |
+| `render_all_detections_bev` | function | 渲染全部 Agent/Map 检测 query 的独立 BEV 图。 |
 | `main` | function | 命令行入口。 |
 
 ## 3. 输入输出 Shape 概览
@@ -21,7 +22,8 @@
 | --- | --- | --- |
 | `run_backbone_feature_pca_sample` | H5 样本图像 `[8, 3, 288, 512]`，目标点 `[2]`，自车运动 `[3]` | `layer_pca_images: [16, 4, 288, 512, 3]`，`layer_token_norms: [16, 4, 18, 32]`，模型输出 BEV 数据，轨迹词表概率 `[256]`，top-k residual/correction 数据，并过滤 `none` |
 | `render_visualization` | `BackboneFeaturePCAVisualizationData` | PIL `Image` |
-| `render_backbone_feature_pca_sample` | H5 路径和样本索引 | PNG 文件 |
+| `render_backbone_feature_pca_sample` | H5 路径和样本索引 | 主 PNG 文件和可选检测 BEV PNG 文件 |
+| `render_all_detections_bev` | `BackboneFeaturePCAVisualizationData` 和 `none_threshold` | PIL `Image` |
 
 ## 4. 公开接口使用规范
 
@@ -30,7 +32,7 @@
 | `run_backbone_feature_pca_sample` | 固定覆盖精度为 FP32，其余结构配置来自 `config/backbone.toml`。 |
 | `render_backbone_feature_pca_sample` | 输出路径必须位于项目目录内。 |
 | `render_visualization` | 只消费真实主干生成的数据，不执行模型逻辑。 |
-| `main` | 命令行运行，默认输出到项目内 `visualization/outputs/backbone_feature_pca/`，可用 `--checkpoint` 加载真实模型权重，也可用 `--agent-top-k`、`--map-top-k` 和 `--agent-confidence-threshold` / `--map-confidence-threshold` 控制检测绘制数量与置信度过滤。 |
+| `main` | 命令行运行，默认输出到项目内 `visualization/outputs/backbone_feature_pca/`，并额外保存检测 query BEV；可用 `--detection-bev-none-threshold` 按 `p(none)` 截断额外 BEV，也可用 `--checkpoint` 加载真实模型权重，以及 `--agent-top-k`、`--map-top-k` 和 `--agent-confidence-threshold` / `--map-confidence-threshold` 控制主诊断图检测绘制。 |
 
 ## 5. 最小使用示例
 
@@ -50,6 +52,8 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Composer | AI 完成：额外检测 BEV 支持 `--detection-bev-none-threshold` none 截断。 |
+| 2026-06-10 | 1os3_Composer | AI 完成：默认额外保存全部检测 query 的独立 BEV PNG。 |
 | 2026-06-09 | 1os3_Composer | AI 完成：已绘制 Agent 标签同时显示 argmax 类别概率和 `none` 概率。 |
 | 2026-06-09 | 1os3_Composer | AI 完成：记录 Agent/Map argmax 置信度阈值过滤参数。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：同步 16 层主干和 Agent 16 / Map 32 默认展示数量摘要。 |

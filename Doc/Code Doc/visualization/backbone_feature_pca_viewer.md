@@ -13,8 +13,9 @@
 | `ModelOutputVisualizationData` | dataclass | 模型输出 BEV 可视化所需的轨迹、轨迹词表概率、top-k residual 修正、Agent 和 Map 预测。 |
 | `BackboneFeaturePCAVisualizationData` | dataclass | 渲染 PNG 所需的样本、shape、精度和 PCA 图。 |
 | `run_backbone_feature_pca_sample` | function | 调用真实主干并收集每层视觉 Token PCA 数据。 |
-| `render_backbone_feature_pca_sample` | function | 运行主干并保存 PNG。 |
+| `render_backbone_feature_pca_sample` | function | 运行主干并保存 PNG，默认额外保存全部检测 BEV。 |
 | `render_visualization` | function | 把可视化数据渲染为 PIL 图像。 |
+| `render_all_detections_bev` | function | 把全部 Agent/Map 检测 query 渲染为独立 BEV PNG。 |
 | `main` | function | 命令行入口。 |
 
 ## 3. 关键类和函数
@@ -46,6 +47,7 @@
   - `agent_boxes`: `[A, 6]`，`[x, y, l, w, h, yaw]`。
   - `agent_none_scores`: `[A]`，完整类别 softmax 上的 `none` 概率。
   - `agent_future_points`: `[A, 6, 2]`，ego 坐标系米制 future。
+  - `map_none_scores`: `[M]`，完整类别 softmax 上的 `none` 概率。
   - `map_points`: `[M, 100, 2]`，ego 坐标系米制 Map 点。
 
 ### `run_backbone_feature_pca_sample`
@@ -56,9 +58,15 @@
 
 ### `render_backbone_feature_pca_sample`
 
-- 功能：运行主干并保存诊断 PNG。
+- 功能：运行主干并保存诊断 PNG，默认额外保存全部检测 query BEV PNG。
 - 输入：H5 路径、样本索引、配置路径、输出路径、项目根目录和设备。
-- 输出：PNG 输出路径。
+- 输出：`(主 PNG 路径, 检测 BEV PNG 路径 | None)`。
+
+### `render_all_detections_bev`
+
+- 功能：把 Agent/Map 检测 query 渲染为独立 BEV PNG，并按 `p(none) > threshold` 截断。
+- 输入：`BackboneFeaturePCAVisualizationData` 和 `none_threshold`。
+- 输出：PIL `Image`。
 
 ## 4. 输入输出与 Shape
 
@@ -77,6 +85,7 @@
 | `agent_boxes` | `[A, 6]` | Agent 查询，`A <= 16`；每个 query 先取包含 `none` 在内的类别 softmax argmax，若 argmax 为 `none` 则不绘制；绘制标签同时显示 argmax 类别概率和 `none` 概率。 |
 | `map_points` | `[M, 100, 2]` | Map 查询，`M <= 32`；每个 query 先取包含 `none` 在内的类别 softmax argmax，若 argmax 为 `none` 则不绘制。 |
 | 输出 PNG | image file | 主干诊断图。 |
+| 检测 BEV PNG | image file | 全部 Agent/Map 检测 query 的独立 BEV 图，默认与主输出同目录。 |
 
 ## 5. 关键实现逻辑
 
@@ -86,7 +95,7 @@
 
 模型输出 BEV 面板从同一次 `MonoDriveBackboneOutput` 中读取检测和轨迹输出。轨迹使用 Softmax 选择 top-k 词表项，把 `trajectory_vocab_symlog + predicted_residual * symlog_scale` 反 Symlog 到米制轨迹。右下角轨迹诊断栏额外显示完整词表概率数量、top-k 概率质量、归一化熵、每条 top 轨迹的概率条、raw residual 最大值、米制 residual correction 的 mean/max 以及最后一个 future 点的 correction。Agent 输出对每个 query 在包含 `none` 的完整类别 softmax 上取最高概率类别；若最高类别不是 `none`，且 argmax 概率不低于 `--agent-confidence-threshold`，才进入绘制候选并按该概率取 top-k，对 `x/y/v/future` 使用反 Symlog、对 `l/w/h` 使用 `expm1`，并用 `[sin_yaw, cos_yaw]` 反求 yaw。BEV 标签格式为 `class:argmax_prob none:none_prob`。Map 输出同样过滤 `none` query 和低于 `--map-confidence-threshold` 的 query 后再取 top-k，对点坐标反 Symlog 后绘制 polyline。`--agent-top-k` 和 `--map-top-k` 可用于临时减少绘制数量。
 
-输出路径通过项目根目录校验，默认写入 `visualization/outputs/backbone_feature_pca/`。
+输出路径通过项目根目录校验，默认写入 `visualization/outputs/backbone_feature_pca/`。主诊断图保存后，默认还会额外写入 `{scene}_detection_bev_{sample_index}.png`，其中按 query 索引绘制 Agent/Map 检测；`p(none) > --detection-bev-none-threshold` 的 query 会被截断不展示。argmax 为 `none` 且未被截断的 Agent 以灰色虚线框显示，Map 以灰色折线显示。
 
 ## 6. 配置项
 
@@ -104,6 +113,9 @@
 | `--map-top-k` | `32` | 模型输出 BEV 面板最多绘制的非 `none` Map 查询数量。 |
 | `--agent-confidence-threshold` | `0.0` | Agent query 在完整类别 softmax 上的 argmax 概率下限；低于该阈值的非 `none` query 不绘制。 |
 | `--map-confidence-threshold` | `0.0` | Map query 在完整类别 softmax 上的 argmax 概率下限；低于该阈值的非 `none` query 不绘制。 |
+| `--detection-bev-output` | 可选 | 额外保存全部检测 query BEV 的 PNG 路径，必须位于项目内。 |
+| `--no-detection-bev` | `False` | 设为 `True` 时不额外保存全部检测 query BEV PNG。 |
+| `--detection-bev-none-threshold` | `1.0` | 额外检测 BEV 的 none 截断阈值；`p(none)` 超过该值的 query 不绘制。 |
 
 ## 7. 依赖关系
 
@@ -128,6 +140,8 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-10 | 1os3_Composer | AI 完成：额外检测 BEV 支持 `--detection-bev-none-threshold` none 截断，并记录 `map_none_scores`。 |
+| 2026-06-10 | 1os3_Composer | AI 完成：默认额外保存全部 Agent/Map 检测 query 的独立 BEV PNG，并暴露 `--detection-bev-output` 与 `--no-detection-bev`。 |
 | 2026-06-09 | 1os3_Composer | AI 完成：已绘制 Agent 标签同时显示 argmax 类别概率和 `none` 概率。 |
 | 2026-06-09 | 1os3_Composer | AI 完成：新增 Agent/Map 检测 query 的 argmax 置信度阈值过滤，并暴露 `--agent-confidence-threshold` 与 `--map-confidence-threshold`。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：同步 16 层主干、2614 序列长度和 Agent 16 / Map 32 默认展示数量。 |
