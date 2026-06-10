@@ -9,7 +9,7 @@
 | 名称 | 类型 | 说明 |
 | --- | --- | --- |
 | `TrajectoryDecodeResult` | dataclass | 含全词表 `probs`、winner 与 top-k 数组。 |
-| `decode_trajectories` | function | 主解码入口。 |
+| `decode_trajectories` | function | 主解码入口；``use_residual=False`` 时跳过残差。 |
 | `decode_winner_trajectory` | function | 强制 winner 索引时的单轨解码。 |
 | `inverse_symlog` | function | $\mathrm{sign}(x)\cdot(e^{|x|}-1)$。 |
 
@@ -18,8 +18,7 @@
 1. 读取 `trajectory_output.logits[0]` → softmax 得 `(V,)`。
 2. 读取 `residuals[0]` 形状 `[V, 6, 2]`。
 3. 从 `model.vocabulary` 取 `trajectory_vocab_symlog` 与 `symlog_scale`。
-4. top-k：`torch.topk(probs)` 索引词表与残差，反 Symlog 得 `(top_k, 6, 2)`。
-5. winner：`argmax(probs)`，必要时单独解码。
+4. top-k / winner：``use_residual=True`` 时 ``vocab + residual * symlog_scale``；``False`` 时仅词表 Symlog，再反 Symlog。
 
 ## 4. 依赖关系
 

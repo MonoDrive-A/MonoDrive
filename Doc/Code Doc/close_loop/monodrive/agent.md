@@ -44,6 +44,7 @@
 | `goal_min_dist_m` | 24.0 | 目标点最小直线距离 (m) |
 | `goal_max_dist_m` | 30.0 | 目标点最大直线距离 (m) |
 | `winner_hysteresis` | 0.15 | winner 切换迟滞 |
+| `use_residual` | True | 是否叠加 Tanh 残差；CLI ``--no-residual`` 关闭 |
 
 ## 5. 依赖关系
 

@@ -36,6 +36,7 @@ cd F:\MonoDrive
 | `--goal-max-dist-m` | 目标点最大直线距离 (m)，默认 30 |
 | `--camera-fov` | 前视水平 FOV (°)，与 B2D 一致，默认 70 |
 | `--camera-full-res` | 使用 B2D 采集分辨率 1600×900 |
+| `--no-residual` | 关闭轨迹 Tanh 残差修正，仅用词表轨迹 |
 | `--legacy-tracking` | 每 tick 推理 + ego-local 预瞄（默认 committed 模式） |
 | `--flip-y` | 翻转 y 轴（训练/仿真坐标系不一致时尝试） |
 

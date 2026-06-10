@@ -40,11 +40,16 @@ def _decode_symlog_trajectories(
     symlog_scale: torch.Tensor,
     residuals: torch.Tensor,
     indices: torch.Tensor,
+    *,
+    use_residual: bool = True,
 ) -> torch.Tensor:
-    """按 ``indices`` 组合词表 Symlog + 残差，返回物理轨迹 ``(N, K, 2)``。"""
+    """按 ``indices`` 组合词表 Symlog（及可选残差），返回物理轨迹 ``(N, K, 2)``。"""
     selected_vocab = vocab_symlog.index_select(0, indices)
-    selected_residuals = residuals.index_select(0, indices)
-    selected_symlog = selected_vocab + selected_residuals * symlog_scale
+    if use_residual:
+        selected_residuals = residuals.index_select(0, indices)
+        selected_symlog = selected_vocab + selected_residuals * symlog_scale
+    else:
+        selected_symlog = selected_vocab
     return inverse_symlog(selected_symlog)
 
 
@@ -52,6 +57,8 @@ def decode_winner_trajectory(
     backbone_output: MonoDriveBackboneOutput,
     model: MonoDriveBackbone,
     winner_idx: int,
+    *,
+    use_residual: bool = True,
 ) -> np.ndarray:
     """解码指定词表索引的物理轨迹 ``(K, 2)``。"""
     logits = backbone_output.trajectory_output.logits[0]
@@ -64,7 +71,9 @@ def decode_winner_trajectory(
     )
     symlog_scale = model.vocabulary.symlog_scale.to(device=device, dtype=torch.float32)
     idx = torch.tensor([int(winner_idx)], device=device, dtype=torch.long)
-    traj = _decode_symlog_trajectories(vocab_symlog, symlog_scale, residuals, idx)
+    traj = _decode_symlog_trajectories(
+        vocab_symlog, symlog_scale, residuals, idx, use_residual=use_residual,
+    )
     return traj[0].detach().cpu().numpy()
 
 
@@ -72,6 +81,8 @@ def decode_trajectories(
     backbone_output: MonoDriveBackboneOutput,
     model: MonoDriveBackbone,
     top_k: int = 8,
+    *,
+    use_residual: bool = True,
 ) -> TrajectoryDecodeResult:
     """从 backbone 输出解码全词表概率、winner 与 top-k 候选轨迹。"""
     logits = backbone_output.trajectory_output.logits[0].to(dtype=torch.float32)
@@ -90,11 +101,13 @@ def decode_trajectories(
     top_probs, top_indices = torch.topk(probs, k=selected_top_k)
 
     top_trajs_phys = _decode_symlog_trajectories(
-        vocab_symlog, symlog_scale, residuals, top_indices,
+        vocab_symlog, symlog_scale, residuals, top_indices, use_residual=use_residual,
     ).detach().cpu().numpy()
 
     winner_idx = int(probs.argmax(dim=-1).item())
-    winner_traj_phys = decode_winner_trajectory(backbone_output, model, winner_idx)
+    winner_traj_phys = decode_winner_trajectory(
+        backbone_output, model, winner_idx, use_residual=use_residual,
+    )
 
     return TrajectoryDecodeResult(
         probs=probs.detach().cpu().numpy(),

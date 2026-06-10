@@ -297,6 +297,7 @@ class MonoDriveAgent:
         goal_max_dist_m: float = GOAL_MAX_DIST_M,
         goal_hold_ticks: int = 1,
         winner_hysteresis: float = 0.15,
+        use_residual: bool = True,
         diagnostic_dir: Optional[str] = None,
         diagnostic_every: int = 1,
     ) -> None:
@@ -353,6 +354,8 @@ class MonoDriveAgent:
                              hold > 1 时 ego 逼近目标后可能落入 OOD。
             winner_hysteresis: re-plan 时新 argmax 相对上一 winner 的 prob 领先不足该值则
                                保持上一 winner，减轻 mode 0 等 flicker（0 = 关闭）。
+            use_residual: 解码时是否叠加 Tanh 残差修正；``False`` 时仅用词表 Symlog 轨迹
+                         （CLI ``--no-residual``）。
             diagnostic_dir: 若指定，则每次 re-plan 把输入与 top-k 轨迹 dump 成 PNG + NPZ。
             diagnostic_every: 每隔 N 次 re-plan 才 dump 一次（默认 1 = 每次都 dump）。
         """
@@ -431,6 +434,7 @@ class MonoDriveAgent:
             )
         self.goal_hold_ticks = max(1, int(goal_hold_ticks))
         self.winner_hysteresis = max(0.0, float(winner_hysteresis))
+        self.use_residual = bool(use_residual)
         self.diagnostic_dir = Path(diagnostic_dir).expanduser().resolve() if diagnostic_dir else None
         self.diagnostic_every = max(1, int(diagnostic_every))
         self.viz_top_k = max(1, int(viz_top_k))
@@ -747,11 +751,17 @@ class MonoDriveAgent:
                 ego_motion=ego_motion_t,
             )
 
-        decode = decode_trajectories(backbone_output, self.model, top_k=self.viz_top_k)
+        decode = decode_trajectories(
+            backbone_output, self.model, top_k=self.viz_top_k,
+            use_residual=self.use_residual,
+        )
         probs_t = torch.from_numpy(decode.probs).to(self.device)
         winner_idx = self._select_winner_idx(probs_t)
         if winner_idx != decode.winner_idx:
-            winner_traj_phys = decode_winner_trajectory(backbone_output, self.model, winner_idx)
+            winner_traj_phys = decode_winner_trajectory(
+                backbone_output, self.model, winner_idx,
+                use_residual=self.use_residual,
+            )
         else:
             winner_traj_phys = decode.winner_traj_phys
 
@@ -791,6 +801,7 @@ class MonoDriveAgent:
                     extra_text=(
                         f"flip_y={self.flip_y} | precision={self.precision}"
                         f" | viz_top_k={self.viz_top_k}"
+                        f" | use_residual={self.use_residual}"
                     ),
                 )
                 dump_openloop_snapshot(

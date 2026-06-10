@@ -151,6 +151,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--no-residual", action="store_true",
+        help="关闭轨迹解码中的 Tanh 残差修正，仅使用词表 Symlog 轨迹",
+    )
+    p.add_argument(
         "--goal-min-dist-m", type=float, default=24.0,
         help=(
             "目标点最小直线距离 (m)，与 data/b2d_preprocess.py 一致（默认 24）"
@@ -761,9 +765,12 @@ def main() -> int:
             goal_max_dist_m=args.goal_max_dist_m,
             goal_hold_ticks=args.goal_hold_ticks,
             winner_hysteresis=args.winner_hysteresis,
+            use_residual=not args.no_residual,
             diagnostic_dir=args.diagnostic_dir,
             diagnostic_every=args.diagnostic_every,
         )
+        if args.no_residual:
+            logger.info("轨迹解码: 仅词表（--no-residual，不叠加 Tanh 残差）")
         logger.info(
             "Goal 选点: training_aligned（直线距离 [%.1f, %.1f] m，路径前方首点）| hold=%d tick (%.1fs)",
             args.goal_min_dist_m,
