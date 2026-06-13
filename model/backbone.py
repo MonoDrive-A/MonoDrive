@@ -656,7 +656,10 @@ class MonoDriveBackbone(nn.Module):
             ego_motion,
         )
         detection_decoder_features = accumulated_detection_queries.to(dtype=torch.float32)
-        detection_output = self.detection_decoder(detection_decoder_features)
+        detection_output = self.detection_decoder(
+            detection_decoder_features,
+            self.detection_query_embedding.anchor_xy_symlog,
+        )
         trajectory_output = self.trajectory_decoder(trajectory_decoder_features)
         return MonoDriveBackboneOutput(
             sequence_features=token_features,

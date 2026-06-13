@@ -41,7 +41,7 @@
   - `target_points`: `[B, 2]`，ego 坐标系米制 `[x, y]`。
   - `ego_motion`: `[B, 3]`，`[V_x, V_y, W]`。
   - `sequence_features`: `[B, 2614, 384]`。
-  - 检测解码输入：第 12 层旁路累积 `Acc_{11}` cast 到 FP32 后送入 `DetectionHeadDecoder`，shape 为 `[B, 48, 384]`。
+  - 检测解码输入：第 12 层旁路累积 `Acc_{11}` cast 到 FP32 后送入 `DetectionHeadDecoder`（shape `[B, 48, 384]`），并附带 `detection_query_embedding.anchor_xy_symlog`（`[48, 2]` symlog 坐标）作为位置/朝向/点参考。
 
 ### `VisualRoPESelfAttention`
 

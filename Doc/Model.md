@@ -258,7 +258,7 @@ $$
 
 #### 5.4 检测查询初始化和可见性过滤
 
-检测查询使用特殊初始化，使 Agent 和 Map 查询的空间 anchor 均匀分布在相机可见区域内。Agent 查询和 Map 查询都不按类别做硬性数量分配；类别由解码分类 logit 学习。
+检测查询由可学习 2D 坐标编码得到：坐标参数直接位于 symlog 空间（初值 = 物理空间 anchor 经 symlog 映射，使 Agent 和 Map 查询的空间 anchor 均匀分布在相机可见区域内），再经线性层编码为查询 Token。梯度直接更新 symlog 坐标，整条链路不做反 symlog，避免指数级 Jacobian 的梯度问题。解码采用 reference + offset：位置和 Map 点叠加查询 symlog 坐标，朝向叠加 symlog 坐标方向的 sin/cos。Agent 查询和 Map 查询都不按类别做硬性数量分配；类别由解码分类 logit 学习。
 
 Agent 的 4 个运动 Mode 使用特殊初始化，初始 future 位移方向在前方 120 度空间内均匀散布。检测解码线性层强制使用 FP32，连续输出保持模型监督空间，不在解码头内做反 Symlog 变换。
 

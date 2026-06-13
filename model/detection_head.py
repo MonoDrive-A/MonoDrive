@@ -23,18 +23,8 @@ __all__ = [
 
 
 SUPPORTED_TOKEN_ORDERS = {"agent_then_map"}
-SUPPORTED_ANCHOR_FEATURES = {
-    "x_symlog",
-    "y_symlog",
-    "radius_normalized",
-    "angle_normalized",
-    "sin_angle",
-    "cos_angle",
-    "is_agent",
-    "is_map",
-    "query_progress",
-}
 SUPPORTED_SPATIAL_ORDERS = {"radius_major_angle_minor", "angle_major_radius_minor"}
+SUPPORTED_COORDINATE_TRANSFORMS = {"symlog"}
 SUPPORTED_POSITION_SOURCES = {"query_anchor_symlog"}
 SUPPORTED_YAW_SOURCES = {"query_angle"}
 SUPPORTED_POINT_SOURCES = {"query_anchor_symlog"}
@@ -52,8 +42,8 @@ class DetectionHeadConfig:
         agent_query_count: Agent 检测查询数量。
         map_query_count: Map 检测查询数量。
         token_order: 检测 Token 在统一序列中的排列顺序。
-        anchor_feature_order: 写入查询初值前若干 hidden 通道的 anchor 特征顺序。
-        query_unfilled_value: 未被 anchor 特征占用的查询初值。
+        query_coordinate_transform: 查询可学习坐标参数所在空间的初始化映射；
+            仅在初始化时把物理 anchor 坐标映射到该空间，前向不再使用。
         agent_class_names: Agent 前景类别名，不包含“无”类别。
         agent_none_class_name: Agent “无”类别名。
         agent_state_order: Agent 连续状态输出字段顺序。
@@ -102,8 +92,7 @@ class DetectionHeadConfig:
     agent_query_count: int
     map_query_count: int
     token_order: str
-    anchor_feature_order: tuple[str, ...]
-    query_unfilled_value: float
+    query_coordinate_transform: str
     agent_class_names: tuple[str, ...]
     agent_none_class_name: str
     agent_state_order: tuple[str, ...]
@@ -155,21 +144,11 @@ class DetectionHeadConfig:
             raise ValueError(
                 f"token_order 仅支持 {sorted(SUPPORTED_TOKEN_ORDERS)}，实际为 {self.token_order!r}。"
             )
-        if len(self.anchor_feature_order) == 0:
-            raise ValueError("anchor_feature_order 不能为空。")
-        if len(set(self.anchor_feature_order)) != len(self.anchor_feature_order):
-            raise ValueError(f"anchor_feature_order 不能包含重复项，实际为 {self.anchor_feature_order}。")
-        unsupported_features = set(self.anchor_feature_order) - SUPPORTED_ANCHOR_FEATURES
-        if unsupported_features:
-            raise ValueError(
-                "anchor_feature_order 包含不支持的特征："
-                f"{sorted(unsupported_features)}，支持 {sorted(SUPPORTED_ANCHOR_FEATURES)}。"
-            )
-        if self.hidden_dim < len(self.anchor_feature_order):
-            raise ValueError(
-                "hidden_dim 必须不小于 anchor_feature_order 长度，"
-                f"实际为 {self.hidden_dim} 和 {len(self.anchor_feature_order)}。"
-            )
+        _validate_transform(
+            self.query_coordinate_transform,
+            SUPPORTED_COORDINATE_TRANSFORMS,
+            "query_coordinate_transform",
+        )
 
         _validate_class_names(self.agent_class_names, self.agent_none_class_name, "agent")
         _validate_class_names(self.map_class_names, self.map_none_class_name, "map")
@@ -355,19 +334,25 @@ class DetectionDecoderOutput(NamedTuple):
 
 
 class DetectionQueryEmbedding(nn.Module):
-    """生成检测查询 Token 初值。
+    """从可学习 2D 坐标编码检测查询 Token。
+
+    可学习参数 `query_anchor_xy_symlog` 直接位于 symlog 空间：初始化时把物理空间
+    anchor 坐标经 `query_coordinate_transform`（symlog）映射后存入，之后梯度直接更新
+    symlog 值。前向用线性层把 symlog 坐标编码为查询 Token，全程不做反 symlog，避免
+    指数级 Jacobian 引起的梯度问题。
 
     Args:
         config: `load_detection_head_config` 读取并校验后的检测头配置。
 
     Shape:
+        `query_anchor_xy_symlog`: `[agent_query_count + map_query_count, 2]`。
         输出: `[agent_query_count + map_query_count, hidden_dim]`。
     """
 
     def __init__(self, config: DetectionHeadConfig) -> None:
         super().__init__()
         self.config = config
-        agent_anchor_xy_m, agent_anchor_angle_rad = _build_spatial_anchors(
+        agent_anchor_xy_m = _build_spatial_anchors(
             angle_min_deg=config.agent_angle_min_deg,
             angle_max_deg=config.agent_angle_max_deg,
             radial_min_m=config.agent_radial_min_m,
@@ -376,7 +361,7 @@ class DetectionQueryEmbedding(nn.Module):
             angle_count=config.agent_angle_count,
             spatial_order=config.agent_spatial_order,
         )
-        map_anchor_xy_m, map_anchor_angle_rad = _build_spatial_anchors(
+        map_anchor_xy_m = _build_spatial_anchors(
             angle_min_deg=config.map_angle_min_deg,
             angle_max_deg=config.map_angle_max_deg,
             radial_min_m=config.map_radial_min_m,
@@ -385,12 +370,12 @@ class DetectionQueryEmbedding(nn.Module):
             angle_count=config.map_angle_count,
             spatial_order=config.map_spatial_order,
         )
-        self.register_buffer("agent_anchor_xy_m", agent_anchor_xy_m)
-        self.register_buffer("agent_anchor_angle_rad", agent_anchor_angle_rad)
-        self.register_buffer("map_anchor_xy_m", map_anchor_xy_m)
-        self.register_buffer("map_anchor_angle_rad", map_anchor_angle_rad)
-        initial_queries = _build_initial_query_tokens(config, agent_anchor_xy_m, agent_anchor_angle_rad, map_anchor_xy_m, map_anchor_angle_rad)
-        self.query_tokens = nn.Parameter(initial_queries)
+        if config.token_order != "agent_then_map":
+            raise ValueError(f"不支持的 token_order：{config.token_order!r}。")
+        anchor_xy_m = torch.cat((agent_anchor_xy_m, map_anchor_xy_m), dim=0)
+        initial_anchor_xy_symlog = _transform_continuous(anchor_xy_m, config.query_coordinate_transform)
+        self.query_anchor_xy_symlog = nn.Parameter(initial_anchor_xy_symlog)
+        self.query_encoder = nn.Linear(2, config.hidden_dim)
         _force_floating_tensors_to_float32(self)
 
     def _apply(self, fn: Any) -> "DetectionQueryEmbedding":
@@ -398,21 +383,34 @@ class DetectionQueryEmbedding(nn.Module):
         _force_floating_tensors_to_float32(self)
         return self
 
+    @property
+    def anchor_xy_symlog(self) -> torch.Tensor:
+        """返回 symlog 空间的可学习查询坐标参数，`[total_query_count, 2]`。"""
+
+        return self.query_anchor_xy_symlog
+
     def forward(self) -> torch.Tensor:
         """返回检测查询 Token。"""
 
-        with _disabled_autocast(self.query_tokens):
-            return self.query_tokens.to(dtype=torch.float32)
+        with _disabled_autocast(self.query_anchor_xy_symlog):
+            anchor_xy_symlog = self.query_anchor_xy_symlog.to(dtype=torch.float32)
+            return self.query_encoder(anchor_xy_symlog).to(dtype=torch.float32)
 
 
 class DetectionHeadDecoder(nn.Module):
     """从检测 Token 特征解码 Agent 和 Map 输出。
 
+    解码采用 reference + offset：位置、朝向和 Map 点的初始先验来自查询的 symlog 空间
+    可学习坐标，线性层只学习相对偏移。位置和 Map 点直接叠加 symlog 坐标（参数本身即
+    symlog 值），yaw 叠加 symlog 坐标方向 `atan2(symlog_y, symlog_x)` 的 sin/cos；全程不做
+    反 symlog。
+
     Args:
         config: `load_detection_head_config` 读取并校验后的检测头配置。
 
     Shape:
-        输入: `[B, agent_query_count + map_query_count, hidden_dim]`。
+        输入特征: `[B, agent_query_count + map_query_count, hidden_dim]`。
+        输入坐标: `[agent_query_count + map_query_count, 2]`，symlog 空间。
         输出: `DetectionDecoderOutput`，所有张量均为 FP32。
     """
 
@@ -429,21 +427,37 @@ class DetectionHeadDecoder(nn.Module):
         _force_floating_tensors_to_float32(self)
         return self
 
-    def forward(self, detection_features: torch.Tensor) -> DetectionDecoderOutput:
+    def forward(
+        self,
+        detection_features: torch.Tensor,
+        query_anchor_xy_symlog: torch.Tensor,
+    ) -> DetectionDecoderOutput:
         """解码检测输出。
 
         本函数只输出模型空间预测，不执行 Softmax、Sigmoid、反 Symlog 或其他
         物理空间反变换。分类概率、Hungarian matching、loss 和推理后处理由
         下游流程负责。
+
+        Args:
+            detection_features: Transformer 后的检测 Token 特征，`[B, Q, hidden_dim]`。
+            query_anchor_xy_symlog: 查询 symlog 空间坐标，`[Q, 2]`，作为位置/朝向/点参考。
         """
 
         self._validate_detection_features(detection_features)
+        self._validate_query_anchor(query_anchor_xy_symlog)
         with _disabled_autocast(detection_features):
             detection_features_fp32 = detection_features.to(dtype=torch.float32)
+            anchor_xy_symlog_fp32 = query_anchor_xy_symlog.to(dtype=torch.float32)
             agent_features, map_features = self._split_detection_features(detection_features_fp32)
+            agent_anchor_symlog, map_anchor_symlog = self._split_query_anchor(anchor_xy_symlog_fp32)
             agent_raw = self.agent_output_linear(agent_features)
             map_raw = self.map_output_linear(map_features)
-            return self._parse_raw_outputs(agent_raw, map_raw)
+            return self._parse_raw_outputs(
+                agent_raw,
+                map_raw,
+                agent_anchor_symlog,
+                map_anchor_symlog,
+            )
 
     def _validate_detection_features(self, detection_features: torch.Tensor) -> None:
         if not torch.is_floating_point(detection_features):
@@ -466,16 +480,45 @@ class DetectionHeadDecoder(nn.Module):
                 f"期望 {self.config.hidden_dim}，实际为 {detection_features.shape[2]}。"
             )
 
+    def _validate_query_anchor(self, query_anchor_xy_symlog: torch.Tensor) -> None:
+        if not torch.is_floating_point(query_anchor_xy_symlog):
+            raise TypeError(
+                f"query_anchor_xy_symlog 必须为浮点张量，实际 dtype 为 {query_anchor_xy_symlog.dtype}。"
+            )
+        if query_anchor_xy_symlog.ndim != 2:
+            raise ValueError(
+                "query_anchor_xy_symlog 期望 shape 为 [Q, 2]，"
+                f"实际为 {tuple(query_anchor_xy_symlog.shape)}。"
+            )
+        if int(query_anchor_xy_symlog.shape[0]) != self.config.total_query_count:
+            raise ValueError(
+                "query_anchor_xy_symlog 的查询数量与配置不一致："
+                f"期望 {self.config.total_query_count}，实际为 {query_anchor_xy_symlog.shape[0]}。"
+            )
+        if int(query_anchor_xy_symlog.shape[1]) != 2:
+            raise ValueError(
+                "query_anchor_xy_symlog 的坐标维度必须为 2，"
+                f"实际为 {query_anchor_xy_symlog.shape[1]}。"
+            )
+
     def _split_detection_features(self, detection_features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.config.token_order != "agent_then_map":
             raise ValueError(f"不支持的 token_order：{self.config.token_order!r}。")
         agent_end = self.config.agent_query_count
         return detection_features[:, :agent_end, :], detection_features[:, agent_end:, :]
 
+    def _split_query_anchor(self, query_anchor_xy_symlog: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.config.token_order != "agent_then_map":
+            raise ValueError(f"不支持的 token_order：{self.config.token_order!r}。")
+        agent_end = self.config.agent_query_count
+        return query_anchor_xy_symlog[:agent_end, :], query_anchor_xy_symlog[agent_end:, :]
+
     def _parse_raw_outputs(
         self,
         agent_raw: torch.Tensor,
         map_raw: torch.Tensor,
+        agent_anchor_symlog: torch.Tensor,
+        map_anchor_symlog: torch.Tensor,
     ) -> DetectionDecoderOutput:
         agent_offset = 0
         agent_class_logits = agent_raw[
@@ -484,6 +527,7 @@ class DetectionHeadDecoder(nn.Module):
         ]
         agent_offset += self.config.agent_class_count_with_none
         agent_states = agent_raw[..., agent_offset : agent_offset + self.config.agent_state_dim]
+        agent_states = agent_states + self._build_agent_state_reference(agent_anchor_symlog)
         agent_offset += self.config.agent_state_dim
         agent_mode_logits = agent_raw[
             ...,
@@ -507,6 +551,7 @@ class DetectionHeadDecoder(nn.Module):
             self.config.map_point_count,
             self.config.map_point_dim,
         )
+        map_points = map_points + self._build_map_point_reference(map_anchor_symlog)
         return DetectionDecoderOutput(
             agent_class_logits=agent_class_logits,
             agent_states=agent_states,
@@ -526,8 +571,9 @@ class DetectionHeadDecoder(nn.Module):
             self._initialize_map_decoder()
 
     def _initialize_agent_decoder(self) -> None:
+        # 位置 x/y 与朝向 sin_yaw/cos_yaw 不在此处写权重：它们的初始先验来自查询 symlog
+        # 坐标参考，在 forward 中加性叠加，对应解码行保持零权重、零 bias，使初始输出 = 参考。
         agent_bias = self.agent_output_linear.bias
-        agent_weight = self.agent_output_linear.weight
         class_start = 0
         class_end = self.config.agent_class_count_with_none
         agent_bias[class_start : class_end - 1].fill_(self.config.agent_class_logit_init_value)
@@ -535,12 +581,6 @@ class DetectionHeadDecoder(nn.Module):
 
         state_start = class_end
         state_indices = _index_by_name(self.config.agent_state_order)
-        if self.config.agent_position_source == "query_anchor_symlog":
-            agent_weight[state_start + state_indices["x"], self._anchor_feature_index("x_symlog")] = 1.0
-            agent_weight[state_start + state_indices["y"], self._anchor_feature_index("y_symlog")] = 1.0
-        if self.config.agent_yaw_source == "query_angle":
-            agent_weight[state_start + state_indices["sin_yaw"], self._anchor_feature_index("sin_angle")] = 1.0
-            agent_weight[state_start + state_indices["cos_yaw"], self._anchor_feature_index("cos_angle")] = 1.0
 
         length_m, width_m, height_m = self.config.agent_size_lwh_m
         agent_bias[state_start + state_indices["length_log1p"]] = _transform_size(length_m, self.config.agent_size_transform)
@@ -567,28 +607,46 @@ class DetectionHeadDecoder(nn.Module):
         agent_bias[mode_end:].copy_(future_template.reshape(-1))
 
     def _initialize_map_decoder(self) -> None:
+        # Map 点的初始先验来自查询 symlog 坐标参考，在 forward 中加性叠加；点解码行保持
+        # 零权重、零 bias，使初始点 = 对应查询 anchor 的 symlog 坐标。
         map_bias = self.map_output_linear.bias
-        map_weight = self.map_output_linear.weight
         class_start = 0
         class_end = self.config.map_class_count_with_none
         map_bias[class_start : class_end - 1].fill_(self.config.map_class_logit_init_value)
         map_bias[class_end - 1].fill_(self.config.map_none_logit_init_value)
 
-        point_start = class_end
-        if self.config.map_point_source == "query_anchor_symlog":
-            for point_index in range(self.config.map_point_count):
-                output_offset = point_start + point_index * self.config.map_point_dim
-                map_weight[output_offset, self._anchor_feature_index("x_symlog")] = 1.0
-                map_weight[output_offset + 1, self._anchor_feature_index("y_symlog")] = 1.0
+    def _build_agent_state_reference(self, agent_anchor_symlog: torch.Tensor) -> torch.Tensor:
+        """构造 Agent 状态参考，`[A, state_dim]`，只在位置和朝向通道非零。"""
 
-    def _anchor_feature_index(self, feature_name: str) -> int:
-        try:
-            return self.config.anchor_feature_order.index(feature_name)
-        except ValueError as exc:
-            raise ValueError(
-                f"anchor_feature_order 必须包含 {feature_name!r}，"
-                f"实际为 {self.config.anchor_feature_order}。"
-            ) from exc
+        state_indices = _index_by_name(self.config.agent_state_order)
+        reference = agent_anchor_symlog.new_zeros(
+            int(agent_anchor_symlog.shape[0]),
+            self.config.agent_state_dim,
+        )
+        if self.config.agent_position_source == "query_anchor_symlog":
+            reference[:, state_indices["x"]] = agent_anchor_symlog[:, 0]
+            reference[:, state_indices["y"]] = agent_anchor_symlog[:, 1]
+        if self.config.agent_yaw_source == "query_angle":
+            # 在 symlog 空间取角度，避免反 symlog 带来的指数级梯度问题。
+            anchor_angle_rad = torch.atan2(agent_anchor_symlog[:, 1], agent_anchor_symlog[:, 0])
+            reference[:, state_indices["sin_yaw"]] = torch.sin(anchor_angle_rad)
+            reference[:, state_indices["cos_yaw"]] = torch.cos(anchor_angle_rad)
+        return reference
+
+    def _build_map_point_reference(self, map_anchor_symlog: torch.Tensor) -> torch.Tensor:
+        """构造 Map 点参考，`[Q_map, point_count, 2]`，每条元素所有点共用查询 anchor。"""
+
+        if self.config.map_point_source != "query_anchor_symlog":
+            return map_anchor_symlog.new_zeros(
+                int(map_anchor_symlog.shape[0]),
+                self.config.map_point_count,
+                self.config.map_point_dim,
+            )
+        return map_anchor_symlog[:, None, :].expand(
+            int(map_anchor_symlog.shape[0]),
+            self.config.map_point_count,
+            self.config.map_point_dim,
+        )
 
 
 def load_detection_head_config(
@@ -623,8 +681,7 @@ def load_detection_head_config(
         agent_query_count=_require_int(query_config, "agent_query_count"),
         map_query_count=_require_int(query_config, "map_query_count"),
         token_order=_require_string(query_config, "token_order"),
-        anchor_feature_order=_require_string_tuple(query_embedding_config, "anchor_feature_order"),
-        query_unfilled_value=_require_float(query_embedding_config, "unfilled_value"),
+        query_coordinate_transform=_require_string(query_embedding_config, "coordinate_transform"),
         agent_class_names=_require_string_tuple(agent_config, "class_names"),
         agent_none_class_name=_require_string(agent_config, "none_class_name"),
         agent_state_order=_require_string_tuple(agent_config, "state_order"),
@@ -678,7 +735,7 @@ def _build_spatial_anchors(
     radial_count: int,
     angle_count: int,
     spatial_order: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     radii = torch.linspace(radial_min_m, radial_max_m, radial_count, dtype=torch.float32)
     angles_deg = torch.linspace(angle_min_deg, angle_max_deg, angle_count, dtype=torch.float32)
     angles_rad = torch.deg2rad(angles_deg)
@@ -695,91 +752,7 @@ def _build_spatial_anchors(
     flat_angle = angle_grid.reshape(-1)
     anchor_x_m = flat_radius * torch.cos(flat_angle)
     anchor_y_m = flat_radius * torch.sin(flat_angle)
-    return torch.stack((anchor_x_m, anchor_y_m), dim=-1), flat_angle
-
-
-def _build_initial_query_tokens(
-    config: DetectionHeadConfig,
-    agent_anchor_xy_m: torch.Tensor,
-    agent_anchor_angle_rad: torch.Tensor,
-    map_anchor_xy_m: torch.Tensor,
-    map_anchor_angle_rad: torch.Tensor,
-) -> torch.Tensor:
-    initial_queries = torch.full(
-        (config.total_query_count, config.hidden_dim),
-        config.query_unfilled_value,
-        dtype=torch.float32,
-    )
-    agent_features = _build_anchor_feature_matrix(
-        config.anchor_feature_order,
-        agent_anchor_xy_m,
-        agent_anchor_angle_rad,
-        angle_min_deg=config.agent_angle_min_deg,
-        angle_max_deg=config.agent_angle_max_deg,
-        radial_min_m=config.agent_radial_min_m,
-        radial_max_m=config.agent_radial_max_m,
-        is_agent=True,
-    )
-    map_features = _build_anchor_feature_matrix(
-        config.anchor_feature_order,
-        map_anchor_xy_m,
-        map_anchor_angle_rad,
-        angle_min_deg=config.map_angle_min_deg,
-        angle_max_deg=config.map_angle_max_deg,
-        radial_min_m=config.map_radial_min_m,
-        radial_max_m=config.map_radial_max_m,
-        is_agent=False,
-    )
-    if config.token_order != "agent_then_map":
-        raise ValueError(f"不支持的 token_order：{config.token_order!r}。")
-    initial_queries[: config.agent_query_count, : len(config.anchor_feature_order)] = agent_features
-    initial_queries[
-        config.agent_query_count :,
-        : len(config.anchor_feature_order),
-    ] = map_features
-    return initial_queries
-
-
-def _build_anchor_feature_matrix(
-    feature_order: tuple[str, ...],
-    anchor_xy_m: torch.Tensor,
-    anchor_angle_rad: torch.Tensor,
-    angle_min_deg: float,
-    angle_max_deg: float,
-    radial_min_m: float,
-    radial_max_m: float,
-    is_agent: bool,
-) -> torch.Tensor:
-    query_count = int(anchor_xy_m.shape[0])
-    features = []
-    anchor_radius_m = torch.linalg.norm(anchor_xy_m, dim=-1)
-    angle_min_rad = math.radians(angle_min_deg)
-    angle_max_rad = math.radians(angle_max_deg)
-    angle_span_rad = angle_max_rad - angle_min_rad
-    radius_span_m = radial_max_m - radial_min_m
-    for feature_name in feature_order:
-        if feature_name == "x_symlog":
-            feature = _symlog(anchor_xy_m[:, 0])
-        elif feature_name == "y_symlog":
-            feature = _symlog(anchor_xy_m[:, 1])
-        elif feature_name == "radius_normalized":
-            feature = (anchor_radius_m - radial_min_m) / radius_span_m
-        elif feature_name == "angle_normalized":
-            feature = ((anchor_angle_rad - angle_min_rad) / angle_span_rad) * 2.0 - 1.0
-        elif feature_name == "sin_angle":
-            feature = torch.sin(anchor_angle_rad)
-        elif feature_name == "cos_angle":
-            feature = torch.cos(anchor_angle_rad)
-        elif feature_name == "is_agent":
-            feature = torch.ones(query_count, dtype=torch.float32) if is_agent else torch.zeros(query_count, dtype=torch.float32)
-        elif feature_name == "is_map":
-            feature = torch.zeros(query_count, dtype=torch.float32) if is_agent else torch.ones(query_count, dtype=torch.float32)
-        elif feature_name == "query_progress":
-            feature = torch.linspace(-1.0, 1.0, query_count, dtype=torch.float32)
-        else:
-            raise ValueError(f"不支持的 anchor feature：{feature_name!r}。")
-        features.append(feature)
-    return torch.stack(features, dim=-1)
+    return torch.stack((anchor_x_m, anchor_y_m), dim=-1)
 
 
 def _build_agent_mode_future_template(config: DetectionHeadConfig) -> torch.Tensor:

@@ -52,10 +52,10 @@ agent_focal_gamma = 1.0
 map_focal_gamma = 1.0
 agent_focal_alpha = 0.75
 map_focal_alpha = 0.5
-agent_non_none_weight = 0.25
-agent_none_weight = 0.75
-map_non_none_weight = 0.25
-map_none_weight = 0.75
+agent_non_none_weight = 0.9
+agent_none_weight = 0.1
+map_non_none_weight = 0.75
+map_none_weight = 0.25
 
 [gradient_monitor]
 enabled = true

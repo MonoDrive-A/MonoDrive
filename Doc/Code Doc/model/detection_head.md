@@ -32,19 +32,18 @@
 
 ### `DetectionQueryEmbedding`
 
-- 功能：根据空间 anchor 初始化检测查询 Token。
+- 功能：从可学习 2D 坐标编码检测查询 Token。可学习参数 `query_anchor_xy_symlog` 直接位于 symlog 空间（初值 = `symlog(物理 anchor)`），前向用线性层编码为查询，全程不做反 symlog。
 - 输入：无运行时输入；初始化时读取配置。
-- 输出：`[48, 384]` FP32 检测查询 Token。
+- 输出：`[48, 384]` FP32 检测查询 Token。`anchor_xy_symlog` 属性暴露 `[48, 2]` symlog 坐标供解码器作参考。
 - Shape：
-  - Agent anchor：`[16, 2]`。
-  - Map anchor：`[32, 2]`。
+  - 可学习 symlog 坐标：`[48, 2]`。
   - 查询 Token：`[48, 384]`。
-- 关键参数：`anchor_feature_order`、Agent / Map 空间角度范围和半径范围。
+- 关键参数：`query_coordinate_transform`、Agent / Map 空间角度范围和半径范围。
 
 ### `DetectionHeadDecoder`
 
-- 功能：从检测 Token 特征解码 Agent 和 Map 输出。
-- 输入：`detection_features`，shape 为 `[B, 48, 384]`。
+- 功能：从检测 Token 特征解码 Agent 和 Map 输出，采用 reference + offset。
+- 输入：`detection_features`，shape 为 `[B, 48, 384]`；`query_anchor_xy_symlog`，shape 为 `[48, 2]`（symlog 空间，作为位置/朝向/点参考）。
 - 输出：`DetectionDecoderOutput`。
 - Shape：
   - Agent class logits：`[B, 16, 4]`。
@@ -67,6 +66,7 @@
 | 名称 | Shape | 说明 |
 | --- | --- | --- |
 | `DetectionQueryEmbedding.forward()` | `[48, 384]` | FP32 检测查询 Token。 |
+| `DetectionQueryEmbedding.anchor_xy_symlog` | `[48, 2]` | symlog 空间可学习查询坐标。 |
 | `detection_features` | `[B, 48, 384]` | Transformer 后的检测 Token 特征。 |
 | `agent_class_logits` | `[B, 16, 4]` | Agent 分类未激活 logit，最后一类为“无”。 |
 | `agent_states` | `[B, 16, 11]` | Agent 状态，字段顺序来自配置。 |
@@ -79,13 +79,13 @@
 
 `load_detection_head_config` 使用 `tomllib` 读取 TOML，并要求配置文件位于项目目录内。实现端不提供结构默认值；缺少表、字段、字段类型错误或 shape 约束不满足都会直接抛出异常。
 
-`DetectionQueryEmbedding` 在初始化时分别构造 Agent 和 Map 空间 anchor。当前配置中 Agent 使用半径 4 档、角度 4 档形成 16 个空间位置；Map 使用半径 4 档、角度 8 档形成 32 个空间位置；两者角度范围均为 `[-60°, 60°]`。查询不绑定类别，只在前若干 hidden 通道写入空间和任务标记特征，包括 Symlog 后的 `x/y`、半径归一化、角度归一化、角度 sin/cos、Agent / Map 标记和查询进度。
+`DetectionQueryEmbedding` 在初始化时分别构造 Agent 和 Map 空间 anchor，拼接后经 `query_coordinate_transform`（symlog）映射为可学习的 symlog 空间坐标参数 `query_anchor_xy_symlog`（`[48, 2]`）。前向用 `nn.Linear(2, hidden_dim)` 把该 symlog 坐标编码为查询 Token；梯度直接更新 symlog 坐标值，前向不再做 symlog、全程无反 symlog（symexp），避免指数级 Jacobian 的梯度问题。查询不绑定类别。
 
 `DetectionHeadDecoder` 使用两个任务分支线性层。Agent 分支输出分类、状态、mode logits 和 future；Map 分支输出分类和 Map 点。前向时会校验输入为浮点 `[B, 48, 384]`，随后禁用 autocast，把输入转为 FP32，再执行线性层。解码输出不做 Softmax、不做 Tanh、不做 Sigmoid、不做反 Symlog。
 
-Agent 解码初始化利用查询 anchor 产生初始检测先验：`x/y` 输出读取查询 Token 中的 `x_symlog/y_symlog` 通道；`sin_yaw/cos_yaw` 读取查询角度；尺寸 bias 写入 `log1p(l/w/h)`；速度和加速度 bias 写入 Symlog 空间初值。4 个 mode 的 future bias 按配置角度和未来距离构造，使 mode 初始方向等间隔覆盖前方 120 度。
+Agent 解码采用 reference + offset：解码器 forward 额外接收 `query_anchor_xy_symlog`，`x/y` 直接叠加查询 symlog 坐标，`sin_yaw/cos_yaw` 叠加 symlog 坐标方向 `atan2(symlog_y, symlog_x)` 的 sin/cos（在 symlog 空间取角度，避免反 symlog）；位置与朝向对应解码行零权重、零 bias，使初始输出等于参考。尺寸 bias 写入 `log1p(l/w/h)`；速度和加速度 bias 写入 Symlog 空间初值。4 个 mode 的 future bias 按配置角度和未来距离构造，使 mode 初始方向等间隔覆盖前方 120 度。
 
-Map 解码初始化把每个 Map 查询的 100 个点都接到查询 anchor 的 Symlog 坐标，使初始 Map 点位于对应空间 anchor。Map 查询同样不绑定具体地图类别。
+Map 解码同样 reference + offset：每个 Map 查询的 100 个点初始叠加其查询 symlog 坐标，使初始 Map 点位于对应空间 anchor；点解码行零初始化。Map 查询同样不绑定具体地图类别。
 
 `DetectionQueryEmbedding` 和 `DetectionHeadDecoder` 都在初始化和 `_apply` 后调用 FP32 恢复逻辑。即使外层启用 BF16 autocast 或父模型整体 `.to(dtype=torch.bfloat16)`，检测查询参数、解码线性层参数、buffer 和输出仍会恢复为 `torch.float32`。
 
@@ -94,7 +94,7 @@ Map 解码初始化把每个 Map 查询的 100 个点都接到查询 anchor 的 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `query.*` | 由 `config/detection_head.toml` 提供 | 检测查询数量、hidden dim 和顺序。 |
-| `query_embedding.*` | 由 `config/detection_head.toml` 提供 | 查询 Token 初始化特征。 |
+| `query_embedding.*` | 由 `config/detection_head.toml` 提供 | 查询可学习坐标的初始化映射（`coordinate_transform`）。 |
 | `agent.*` | 由 `config/detection_head.toml` 提供 | Agent 类别、状态字段和 future shape。 |
 | `agent_query_initialization.*` | 由 `config/detection_head.toml` 提供 | Agent 空间 anchor 初始化。 |
 | `agent_state_initialization.*` | 由 `config/detection_head.toml` 提供 | Agent 状态初始输出。 |
@@ -127,5 +127,6 @@ Map 解码初始化把每个 Map 查询的 100 个点都接到查询 anchor 的 
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-13 | 1os3 | AI 完成：查询改为可学习 symlog 坐标经 `nn.Linear(2, hidden_dim)` 编码；解码器 forward 接收查询坐标，位置/朝向/Map 点改 reference + offset；移除 anchor 特征矩阵机制。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：同步 Agent 16 个、Map 32 个检测查询和输出 shape。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增检测查询初始化和检测解码头，实现无类别硬分配查询、Agent 4-mode 120 度均匀初始化、FP32 解码线性层和模型空间输出。 |

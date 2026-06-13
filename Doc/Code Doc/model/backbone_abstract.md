@@ -23,7 +23,7 @@
 | `load_backbone_config` | TOML 路径 | `BackboneConfig` |
 | `override_backbone_precision` | `BackboneConfig` 和 dtype 名称 | 新的 `BackboneConfig` |
 
-检测解码：`Acc_{11}: [B, 48, 384]`（骨干精度）cast 到 FP32 后送入 `DetectionHeadDecoder`。前 12 层每层先经逐层 `TokenRMSNorm`，再通过零初始化 $W_i$ 和 $E_i$ 做旁路残差与写回；`Query`（FP32）为累积种子。
+检测解码：`Acc_{11}: [B, 48, 384]`（骨干精度）cast 到 FP32 后，连同 `detection_query_embedding.anchor_xy_symlog`（`[48, 2]`）一起送入 `DetectionHeadDecoder`，坐标作为位置/朝向/点的 reference。前 12 层每层先经逐层 `TokenRMSNorm`，再通过零初始化 $W_i$ 和 $E_i$ 做旁路残差与写回；`Query`（FP32，由可学习 symlog 坐标经线性层编码）为累积种子。
 
 ## 4. 公开接口使用规范
 

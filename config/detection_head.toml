@@ -1,22 +1,13 @@
 [query]
 hidden_dim = 384
-agent_query_count = 16
-map_query_count = 32
+agent_query_count = 8
+map_query_count = 24
 token_order = "agent_then_map"
 
 [query_embedding]
-anchor_feature_order = [
-  "x_symlog",
-  "y_symlog",
-  "radius_normalized",
-  "angle_normalized",
-  "sin_angle",
-  "cos_angle",
-  "is_agent",
-  "is_map",
-  "query_progress",
-]
-unfilled_value = 0.0
+# 查询可学习坐标参数所在空间的初始化映射：仅在初始化时把物理 anchor 坐标映射到该空间，
+# 前向直接用线性层把该 symlog 空间坐标编码为查询 Token，全程不做反 symlog。
+coordinate_transform = "symlog"
 
 [agent]
 class_names = ["car", "bicycle", "pedestrian"]
@@ -43,7 +34,7 @@ angle_min_deg = -60.0
 angle_max_deg = 60.0
 radial_min_m = 4.0
 radial_max_m = 32.0
-radial_count = 4
+radial_count = 2
 angle_count = 4
 spatial_order = "radius_major_angle_minor"
 
@@ -77,8 +68,8 @@ angle_min_deg = -60.0
 angle_max_deg = 60.0
 radial_min_m = 4.0
 radial_max_m = 32.0
-radial_count = 4
-angle_count = 8
+radial_count = 6
+angle_count = 4
 spatial_order = "radius_major_angle_minor"
 
 [map_point_initialization]

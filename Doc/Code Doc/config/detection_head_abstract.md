@@ -9,7 +9,7 @@
 | 名称 | 类型 | 说明 |
 | --- | --- | --- |
 | `[query]` | TOML table | 检测查询数量、hidden dim 和顺序。 |
-| `[query_embedding]` | TOML table | 查询 Token 初始 anchor 特征。 |
+| `[query_embedding]` | TOML table | 查询可学习坐标的初始化映射（`coordinate_transform`）。 |
 | `[agent]` | TOML table | Agent 类别、状态字段和 future 配置。 |
 | `[agent_query_initialization]` | TOML table | Agent 空间 anchor 初始化。 |
 | `[agent_mode_initialization]` | TOML table | Agent 4 个 mode 的 120 度均匀初始化。 |
@@ -33,7 +33,7 @@
 | 接口 | 使用规范 |
 | --- | --- |
 | `[query]` | 查询数量必须与空间采样数乘积一致；查询不按类别硬分配。 |
-| `[query_embedding]` | `hidden_dim` 必须不小于 anchor 特征数量。 |
+| `[query_embedding]` | `coordinate_transform` 仅支持 `symlog`，仅用于把物理 anchor 映射到可学习坐标空间。 |
 | `[agent]` | Agent 类别不包含 `motorcycle`，无类别由 `none_class_name` 表示。 |
 | `[agent_mode_initialization]` | `mode_angles_deg` 必须等间隔，且首尾对齐 Agent 查询角度范围。 |
 | `[map]` | Map 类别不包含 CrossWalk，局部元素点数为 100。 |
@@ -53,5 +53,6 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-13 | 1os3 | AI 完成：检测查询改为可学习 symlog 坐标经线性层编码，`[query_embedding]` 改为 `coordinate_transform`。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：同步 Agent 16 / Map 32 检测查询摘要。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增检测头配置摘要文档。 |

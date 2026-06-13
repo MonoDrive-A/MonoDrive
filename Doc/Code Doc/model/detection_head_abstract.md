@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | `load_detection_head_config` | TOML 路径 | `DetectionHeadConfig` |
 | `DetectionQueryEmbedding.forward` | 无 | `[48, 384]` |
-| `DetectionHeadDecoder.forward` | `[B, 48, 384]` | `DetectionDecoderOutput` |
+| `DetectionHeadDecoder.forward` | `[B, 48, 384]` 特征 + `[48, 2]` symlog 坐标 | `DetectionDecoderOutput` |
 | `agent_class_logits` | - | `[B, 16, 4]` |
 | `agent_states` | - | `[B, 16, 11]` |
 | `agent_future_trajectories` | - | `[B, 16, 4, 6, 2]` |
@@ -31,8 +31,8 @@
 | 接口 | 使用规范 |
 | --- | --- |
 | `DetectionHeadConfig` | 只应由配置加载函数构造；所有结构字段来自 `config/detection_head.toml`。 |
-| `DetectionQueryEmbedding` | 构造时传入已校验配置；查询初值为空间 anchor，不按类别硬分配。 |
-| `DetectionHeadDecoder` | 输入必须是浮点 `[B, 48, 384]`；内部禁用 autocast 并输出 FP32。 |
+| `DetectionQueryEmbedding` | 构造时传入已校验配置；可学习坐标在 symlog 空间，经线性层编码为查询，不按类别硬分配。 |
+| `DetectionHeadDecoder` | 输入浮点特征 `[B, 48, 384]` 与 symlog 坐标 `[48, 2]`；内部禁用 autocast 并输出 FP32；位置/朝向/点为 reference + offset。 |
 | `load_detection_head_config` | 配置路径必须在项目目录内；缺失表或字段会抛出异常。 |
 
 ## 5. 最小使用示例
@@ -41,7 +41,9 @@
 
 ## 6. 维护注意事项
 
-- Agent 和 Map 查询不按类别硬分配。
+- Agent 和 Map 查询不按类别硬分配；查询由可学习 symlog 坐标经线性层编码得到。
+- 可学习坐标直接在 symlog 空间更新，整条链路不做反 symlog（symexp），避免梯度爆炸。
+- 解码采用 reference + offset：位置/Map 点叠加查询 symlog 坐标，yaw 叠加 symlog 坐标方向的 sin/cos。
 - Agent 4 个 future mode 的初始化角度必须等间隔，且首尾对齐查询角度范围以覆盖前方 120 度。
 - 解码输出不做反 Symlog；Agent future 和 Map 点保持模型空间。
 - 检测查询和解码线性层强制 FP32；修改精度策略必须同步更新 `Doc/Model.md`。
@@ -51,5 +53,6 @@
 
 | 日期 | 修改人 | 变更 |
 | --- | --- | --- |
+| 2026-06-13 | 1os3 | AI 完成：查询改为可学习 symlog 坐标 + 线性编码，解码改 reference + offset 并接收查询坐标。 |
 | 2026-06-08 | 1os3_Codex | AI 完成：同步 Agent 16 / Map 32 检测查询摘要。 |
 | 2026-06-07 | 1os3_Codex | AI 完成：新增检测头模型文件摘要文档。 |
