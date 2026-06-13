@@ -276,8 +276,8 @@ class MonoDriveBackboneOutput(NamedTuple):
         `vision_features`: `[B, 2304, D]`。
         `register_features`: `[B, 4, D]`。
         `detection_features`: 第 12 层旁路累积结果 Acc_11，`[B, 48, D]`，骨干精度。
-        `trajectory_features`: `[B, 256, D]`。
-        `trajectory_decoder_features`: `[B, 256, D]`。
+        `trajectory_features`: `[B, 256, D]`，自车运动已于第 13 层输入注入。
+        `trajectory_decoder_features`: `[B, 256, D]`，float32 轨迹特征，等于 `trajectory_features`。
         `goal_features`: `[B, 2, D]`。
         `layer_vision_features`: 每项 `[B, 2304, D]`。
     """
@@ -630,6 +630,11 @@ class MonoDriveBackbone(nn.Module):
                         images.device,
                         token_slices,
                     )
+                    token_features = self._inject_ego_motion(
+                        token_features,
+                        ego_motion,
+                        token_slices,
+                    )
                 token_features = transformer_block(token_features, visual_positions, token_slices)
                 if layer_index < GOAL_TOKEN_INSERT_LAYER_INDEX:
                     token_features, accumulated_detection_queries = (
@@ -651,10 +656,7 @@ class MonoDriveBackbone(nn.Module):
                 f"layer_count={self.config.layer_count}。"
             )
         split_features = self._split_sequence_features(token_features, token_slices)
-        trajectory_decoder_features = self._prepare_trajectory_decoder_features(
-            split_features["trajectory"],
-            ego_motion,
-        )
+        trajectory_decoder_features = split_features["trajectory"].to(dtype=torch.float32)
         detection_decoder_features = accumulated_detection_queries.to(dtype=torch.float32)
         detection_output = self.detection_decoder(
             detection_decoder_features,
@@ -957,21 +959,49 @@ class MonoDriveBackbone(nn.Module):
             "goal": sequence_features[:, token_slices.goal, :],
         }
 
-    def _prepare_trajectory_decoder_features(
+    def _inject_ego_motion(
         self,
-        trajectory_features: torch.Tensor,
+        token_features: torch.Tensor,
         ego_motion: torch.Tensor,
+        token_slices: BackboneTokenSlices,
     ) -> torch.Tensor:
-        with _disabled_autocast(trajectory_features):
-            ego_motion_fp32 = ego_motion.to(device=trajectory_features.device, dtype=torch.float32)
+        """在第 13 层输入前，将自车运动编码注入轨迹 Token。
+
+        Args:
+            token_features: `[B, L, hidden_dim]`，已追加目标点 Token 的第 13 层输入。
+            ego_motion: `[B, ego_motion_input_dim]`，`[V_x, V_y, W]`。
+            token_slices: 统一序列切片。
+
+        Returns:
+            轨迹切片叠加自车运动编码后的 `token_features`。
+        """
+        ego_motion_features = self._encode_ego_motion(ego_motion, token_features)
+        ego_motion_features = ego_motion_features.to(dtype=token_features.dtype)
+        token_features = token_features.clone()
+        token_features[:, token_slices.trajectory, :] = (
+            token_features[:, token_slices.trajectory, :] + ego_motion_features[:, None, :]
+        )
+        return token_features
+
+    def _encode_ego_motion(
+        self,
+        ego_motion: torch.Tensor,
+        reference_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        """对自车运动执行数值变换并线性编码到 hidden_dim，全程 float32。
+
+        Returns:
+            `[B, hidden_dim]`，float32 自车运动编码。
+        """
+        with _disabled_autocast(reference_tensor):
+            ego_motion_fp32 = ego_motion.to(device=reference_tensor.device, dtype=torch.float32)
             if self.config.ego_motion_vector_transform == "symlog":
                 ego_motion_fp32 = torch.sign(ego_motion_fp32) * torch.log1p(torch.abs(ego_motion_fp32))
             else:
                 raise ValueError(
                     f"不支持的 ego_motion_vector_transform：{self.config.ego_motion_vector_transform!r}。"
                 )
-            ego_motion_features = self.ego_motion_encoder(ego_motion_fp32)
-            return trajectory_features.to(dtype=torch.float32) + ego_motion_features[:, None, :]
+            return self.ego_motion_encoder(ego_motion_fp32)
 
 def load_backbone_config(
     config_path: str | Path,
